@@ -23,9 +23,9 @@
 10. 🔐 [Security and Spring Boot Admin features](#security-and-sba-features)
 11. 📡 [Actuator endpoints](#actuator-endpoints)
 
-Eureka service discovery demo. 6 Maven modules: 1 Eureka registry + 3 REST
-microservices + 1 API gateway + 1 Spring Boot Admin dashboard, all registering
-with the registry. Plus `zipkin-server`, a Zipkin tracing server module (Spring Boot 3.5, `@EnableZipkinServer`, OTLP
+Eureka service discovery demo. 6 Maven modules: 1 Eureka registry (run as 2–3
+replicating nodes) + 3 REST microservices + 1 API gateway + 1 Spring Boot Admin
+dashboard, all registering with the registry. Plus `zipkin-server`, a Zipkin tracing server module (Spring Boot 3.5, `@EnableZipkinServer`, OTLP
 receiver).
 
 <a id="modules"></a>
@@ -34,7 +34,7 @@ receiver).
 
 | Module (README)                                                                                | Port       | Role                                                                                                                                                | REST API                                                                                                                               | Swagger UI                                                                         |
 |------------------------------------------------------------------------------------------------|------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
-| [`eureka-server-1`](eureka-server-1/README.md), [`eureka-server-2`](eureka-server-2/README.md) | 8761, 8762 | Service registry / dashboard — 2 replicating peers                                                                                                  | —                                                                                                                                      | —                                                                                  |
+| [`eureka-server`](eureka-server/README.md)                                                     | 8761–8763  | Service registry / dashboard — 2-3 replicating nodes, one module, one profile each (`peer1`, `peer2`, `peer3`)                                      | —                                                                                                                                      | —                                                                                  |
 | [`user-service`](user-service/README.md)                                                       | 8081       | Eureka client                                                                                                                                       | `GET /api/users`, `GET /api/users/{id}`                                                                                                | http://localhost:8081/swagger-ui.html                                              |
 | [`order-service`](order-service/README.md)                                                     | 8082       | Eureka client                                                                                                                                       | `GET /api/orders`, `GET /api/orders/{id}`, `GET /api/orders/{id}/with-user` (calls `user-service` directly, load-balanced, no gateway) | http://localhost:8082/swagger-ui.html                                              |
 | [`product-service`](product-service/README.md)                                                 | 8083       | Eureka client                                                                                                                                       | `GET /api/products`, `GET /api/products/{id}`                                                                                          | http://localhost:8083/swagger-ui.html                                              |
@@ -47,7 +47,7 @@ Every module is secured with HTTP Basic, one shared user `admin`/`admin`
 `/actuator/health` and `/actuator/info` are public — see
 [§10](#security-and-sba-features). `order-service`, `user-service` and
 `product-service` need Docker: each starts its own Postgres from the
-`docker-compose.yaml` in its module directory (host ports 5433, 5434, 5435).
+`docker-compose.yaml` in its module directory (host ports 5433, 5434, 5436).
 The Insomnia collection for the gateway routes is
 [`gateway-service/insomnia_collection.json`](gateway-service/insomnia_collection.json).
 
@@ -89,7 +89,7 @@ default), picks a live instance, and rewrites the URI to that instance's real
 ```mermaid
 flowchart TB
     Client["Client<br/>(Insomnia / curl)"]
-    Eureka["eureka-server<br/>:8761<br/>service registry"]
+    Eureka["eureka-server<br/>:8761 · :8762 · :8763<br/>service registry, 2-3 nodes"]
 
     subgraph Gateway["gateway-service :8080"]
         Route["Route table<br/>Path=/api/users/** → lb://USER-SERVICE<br/>Path=/api/orders/** → lb://ORDER-SERVICE<br/>Path=/api/products/** → lb://PRODUCT-SERVICE"]
@@ -271,8 +271,10 @@ The tracing stack is optional and can start at any time.
 ```bash
 cd learning-spring-cloud
 mvn -pl zipkin-server spring-boot:run &      # optional: tracing UI at http://localhost:9411
-mvn -pl eureka-server-1 spring-boot:run &
-mvn -pl eureka-server-2 spring-boot:run &
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer1 &
+# once it is up (it builds eureka-server/target, which the other nodes reuse):
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer2 &
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer3 &   # optional third node
 # wait for them to come up, then:
 mvn -pl user-service spring-boot:run &
 mvn -pl order-service spring-boot:run &
@@ -293,7 +295,8 @@ and pass `spring.datasource.*`, or use `spring-boot:run`.
 
 ## <span style="color:hsl(33,80%,58%)">5. ✅ Verify</span>
 
-- **Eureka dashboards**: http://localhost:8761 and http://localhost:8762 (same registry, replicated) — list
+- **Eureka dashboards**: http://localhost:8761, http://localhost:8762 and http://localhost:8763 (same registry,
+  replicated; each node's *DS Replicas* lists the others) — list
   `USER-SERVICE`,
   `ORDER-SERVICE`, `PRODUCT-SERVICE`, `GATEWAY-SERVICE`, `ADMIN-SERVER` once all
   5 clients register (takes a few seconds after startup; default renewal interval).
@@ -302,9 +305,9 @@ and pass `spring.datasource.*`, or use `spring-boot:run`.
   with drill-down per instance: health, `/env`, `/metrics`, `/loggers` (change
   log levels live), `/threaddump`, `/heapdump`, `/mappings`, `/beans`,
   `/configprops`, plus the views listed in [§10](#security-and-sba-features).
-  `eureka-server` is listed too — it registers with itself.
+  `EUREKA-SERVER` is listed too — one instance per running node.
 - **Health checks** (Spring Boot Actuator, `show-details: always`):
-    - http://localhost:8761/actuator/health
+    - http://localhost:8761/actuator/health (other nodes: :8762, :8763)
     - http://localhost:8081/actuator/health
     - http://localhost:8082/actuator/health
     - http://localhost:8083/actuator/health
@@ -449,12 +452,12 @@ routing to a dead instance for zero downtime on lookups — the opposite
 choice (CP, e.g. a strongly-consistent registry) would instead block or
 error the lookup during any disagreement, which is worse for a system where
 "probably still up" beats "definitely correct but unavailable." The nuance:
-this repo runs **two** peer `eureka-server` nodes (`eureka-server-1` :8761,
-`eureka-server-2` :8762, two modules with the same code). Replication between them is
+this repo runs two or three `eureka-server` nodes (one module, profiles `peer1` :8761,
+`peer2` :8762, `peer3` :8763). Replication between them is
 asynchronous and best-effort — a registration hits one node and reaches the
-other moments later, and during a partition both keep serving their own,
+others moments later, and during a partition each keeps serving its own,
 possibly diverging, view. That's the AP choice in action, and the reason
-clients list both URLs in `defaultZone`: one node down, they fail over.
+clients list every node in `defaultZone`: one node down, they fail over.
 
 <a id="faq-self-preservation"></a>
 
@@ -644,13 +647,13 @@ one feeds.
 
 - ***Boot's own default*** — over HTTP only `health` is exposed; every endpoint except `shutdown` is accessible once
   exposed (`shutdown` needs `management.endpoint.shutdown.access: unrestricted`).
-- ***`eureka ×2`*** — `eureka-server-1` and `eureka-server-2` share the same list.
+- ***`eureka`*** — `eureka-server`: one list for every node (`peer1`, `peer2`, `peer3`).
 - ***`zipkin-server`*** is not in the table: it runs Zipkin's own server (it registers in Eureka as `zipkin-server`
   through `zipkin.discovery.eureka`), not Spring Boot Actuator.
 
 **Spring Boot Actuator:**
 
-| Endpoint           | What it shows / does                                                                   | Needs                                      | eureka ×2 | admin | gateway | user | product | order |
+| Endpoint           | What it shows / does                                                                   | Needs                                      | eureka    | admin | gateway | user | product | order |
 |--------------------|----------------------------------------------------------------------------------------|--------------------------------------------|-----------|-------|---------|------|---------|-------|
 | `health`           | App health with details and groups (`liveness`, `readiness`)                           | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
 | `info`             | App info: `info.*`, build, git, java, os, process                                      | contributors via `management.info.*`       | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
@@ -681,7 +684,7 @@ one feeds.
 
 **Spring Cloud** (present when the dependency is on the classpath):
 
-| Endpoint          | What it shows / does                                        | Needs                       | eureka ×2 | admin | gateway | user | product | order |
+| Endpoint          | What it shows / does                                        | Needs                       | eureka    | admin | gateway | user | product | order |
 |-------------------|-------------------------------------------------------------|-----------------------------|-----------|-------|---------|------|---------|-------|
 | `refresh`         | Re-bind `@RefreshScope` / `@ConfigurationProperties` (POST) | Spring Cloud Context        | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
 | `restart`         | Restart the context (POST)                                  | Spring Cloud Context        | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |

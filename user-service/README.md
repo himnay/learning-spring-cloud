@@ -396,7 +396,7 @@ instance.
 eureka:
   client:
     service-url:
-      defaultZone: http://admin:admin@localhost:8761/eureka/,http://admin:admin@127.0.0.1:8762/eureka/
+      defaultZone: http://admin:admin@localhost:8761/eureka/,http://admin:admin@127.0.0.1:8762/eureka/,http://admin:admin@127.0.0.2:8763/eureka/
   instance:
     prefer-ip-address: true            # SBA calls the address registered here, it must be reachable
     metadata-map:

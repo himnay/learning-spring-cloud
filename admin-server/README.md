@@ -77,8 +77,8 @@ Dependencies in [pom.xml](pom.xml):
 
 ```bash
 cd learning-spring-cloud
-mvn -pl eureka-server-1 spring-boot:run &
-mvn -pl eureka-server-2 spring-boot:run &
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer1 &
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer2 &   # once peer1 is up; peer3 optional
 # wait for http://localhost:8761, then:
 mvn -pl admin-server spring-boot:run
 ```
@@ -726,5 +726,5 @@ Things to know:
 - ***Backends see the service, not the person*** — every call, including UI actions SBA proxies (Shutdown, Environment
   update), reaches the backend as the `admin-server` client. To carry the logged-in user's identity, the UI itself must
   use OAuth2 login with token relay, which means giving up Basic for the UI.
-- ***Eureka is a third path*** — registration and heartbeats to `:8761` / `:8762` still use Basic via `defaultZone`;
+- ***Eureka is a third path*** — registration and heartbeats to `:8761` / `:8762` / `:8763` still use Basic via `defaultZone`;
   moving those to OAuth2 is a separate change.

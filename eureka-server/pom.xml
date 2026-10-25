@@ -11,9 +11,9 @@
         <version>0.0.1-SNAPSHOT</version>
     </parent>
 
-    <artifactId>eureka-server-2</artifactId>
-    <name>eureka-server-2</name>
-    <description>Eureka service registry, peer 2 of 2 — dashboard at /</description>
+    <artifactId>eureka-server</artifactId>
+    <name>eureka-server</name>
+    <description>Eureka service registry, 2-3 replicating nodes via profiles peer1/peer2/peer3 — dashboard at /</description>
 
     <dependencies>
         <dependency>

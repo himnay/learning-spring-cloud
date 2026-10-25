@@ -19,8 +19,8 @@
     <description>Eureka service discovery demo: 3 microservices registering to a Eureka registry</description>
 
     <modules>
-        <module>eureka-server-1</module>
-        <module>eureka-server-2</module>
+        <!-- one module, 2-3 replicating nodes: profiles peer1 / peer2 / peer3 (see eureka-server/README.md) -->
+        <module>eureka-server</module>
         <module>admin-server</module>
         <module>user-service</module>
         <module>order-service</module>

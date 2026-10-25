@@ -9,7 +9,7 @@ import org.springframework.test.web.servlet.client.RestTestClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-// standalone in tests: don't register with or fetch from the peer, which isn't running
+// standalone in tests: don't register with or fetch from the other nodes, which aren't running
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {"eureka.client.register-with-eureka=false", "eureka.client.fetch-registry=false"})
 class EurekaServerApplicationTests {

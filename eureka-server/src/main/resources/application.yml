@@ -1,13 +1,16 @@
-# Peer 1 of 2 — eureka-server-2 is the same code with port 8762 and the peer URL flipped.
-# Peers must have distinct hostnames — Eureka skips any peer URL whose host equals its own (the port is
-# ignored) — so node 1 is "localhost" and node 2 "127.0.0.1": both resolve everywhere, no /etc/hosts entry.
+# One module for every registry node: the profile picks which node this process is. Run two or three for HA:
+#   peer1  :8761  hostname localhost   (also the default: active unless peer2 or peer3 is)
+#   peer2  :8762  hostname 127.0.0.1
+#   peer3  :8763  hostname 127.0.0.2
+# All nodes share one defaultZone listing the three; for replication a node drops the entry whose host equals its own
+# eureka.instance.hostname (the port is ignored), so the hostnames must differ. All three are loopback, no /etc/hosts
+# entry: Linux and Windows route all of 127.0.0.0/8 to loopback, macOS needs `sudo ifconfig lo0 alias 127.0.0.2` once.
 server:
-  port: 8761
   shutdown: graceful   # Boot 3.4+ default, explicit here: finish in-flight requests (max spring.lifecycle.timeout-per-shutdown-phase, 30 s) before stopping
 
 spring:
   application:
-    name: eureka-server   # same app name on both peers: one EUREKA-SERVER app with 2 instances (dashboard replica check needs it)
+    name: eureka-server   # same app name on every node: one EUREKA-SERVER app with one instance per node (dashboard replica check needs it)
   security:
     user:
       name: ${ACTUATOR_USER:admin}
@@ -30,7 +33,6 @@ eureka:
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # evicted 30 s after the last heartbeat (default 90)
-    hostname: localhost
     metadata-map:
       # SBA discovers this node from the registry and polls /actuator with these credentials
       user.name: ${spring.security.user.name}
@@ -38,11 +40,16 @@ eureka:
       tags.environment: ${APP_ENV:local}   # SBA shows tags.* as badges in the application list
       tags.tier: infra
   client:
-    # register with the peer (so SBA lists the registry too) and replicate through it
+    # register with the cluster (so SBA lists the registry too): whichever node takes the registration, this one
+    # included, replicates it to the others
     register-with-eureka: true
-    fetch-registry: true   # on startup this node copies its registry from the peer; without it a restart comes up empty
+    # on startup this node copies the registry its client fetched from a peer; without it a restart comes up empty.
+    # register-with-eureka makes Spring Cloud set eureka.server.registry-sync-retries to 5: with no peer up yet (cold
+    # cluster) the copy retries after 30 s, so "Started Eureka Server" comes ~30 s after Tomcat — README "Run a cluster"
+    fetch-registry: true
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.1:8762/eureka/
+      # the whole cluster; every client module lists the same three
+      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.1:8762/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.2:8763/eureka/
   server:
     # on everywhere: a network blip can't mass-evict the registry (and the dashboard drops the
     # "SELF PRESERVATION MODE IS TURNED OFF" banner); EUREKA_SELF_PRESERVATION=false to opt out
@@ -62,7 +69,7 @@ info: # published by /actuator/info (needs management.info.env.enabled) → SBA 
 
 logging:
   file:
-    name: logs/eureka-server-1.log   # enables /actuator/logfile (SBA Logfile view)
+    name: logs/${spring.application.name}-${server.port}.log   # one file per node; enables /actuator/logfile (SBA Logfile view)
 
 management:
   info: # extra contributors shown in SBA Details → Info
@@ -116,8 +123,51 @@ management:
       access: unrestricted
 
 ---
-# Production profile (SPRING_PROFILES_ACTIVE=prod): keep the registry during network partitions
-# instead of evicting everything at once — see README "Should self-preservation be on in prod?".
+# Node 1. Also active when neither peer2 nor peer3 is: plain spring-boot:run, IDE run, tests, prod alone
+spring:
+  config:
+    activate:
+      on-profile: "peer1 | !(peer2 | peer3)"
+
+server:
+  port: 8761
+
+eureka:
+  instance:
+    hostname: localhost
+
+---
+# Node 2
+spring:
+  config:
+    activate:
+      on-profile: peer2
+
+server:
+  port: 8762
+
+eureka:
+  instance:
+    hostname: 127.0.0.1
+
+---
+# Node 3, optional: while it is down the other nodes list it under unavailable-replicas and log a connection error
+# for it every 10 s
+spring:
+  config:
+    activate:
+      on-profile: peer3
+
+server:
+  port: 8763
+
+eureka:
+  instance:
+    hostname: 127.0.0.2
+
+---
+# Production profile, on top of a node (SPRING_PROFILES_ACTIVE=peer2,prod; prod alone is peer1): keep the registry
+# during network partitions instead of evicting everything at once — see the root README FAQ on self-preservation.
 spring:
   config:
     activate:

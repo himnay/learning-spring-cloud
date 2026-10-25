@@ -12,4 +12,4 @@ services:
       POSTGRES_USER: products
       POSTGRES_PASSWORD: products
     ports:
-      - "5435:5432"   # 5435 on the host: 5433/5434 are order-/user-service's Postgres
+      - "5436:5432"   # 5436 on the host: 5433/5434 are order-/user-service's Postgres, 5435 is learning-kafka's

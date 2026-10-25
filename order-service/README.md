@@ -116,8 +116,8 @@ curl -u admin:admin http://localhost:8082/api/orders/101/with-user
 
 ```bash
 # from the repo root
-mvn -pl eureka-server-1 spring-boot:run &
-mvn -pl eureka-server-2 spring-boot:run &
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer1 &
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer2 &   # once peer1 is up; peer3 optional
 mvn -pl user-service  spring-boot:run &     # only needed for /with-user
 mvn -pl order-service spring-boot:run
 ```
@@ -563,7 +563,7 @@ instance.
 eureka:
   client:
     service-url:
-      defaultZone: http://admin:admin@localhost:8761/eureka/,http://admin:admin@127.0.0.1:8762/eureka/
+      defaultZone: http://admin:admin@localhost:8761/eureka/,http://admin:admin@127.0.0.1:8762/eureka/,http://admin:admin@127.0.0.2:8763/eureka/
   instance:
     prefer-ip-address: true            # SBA calls the address registered here, it must be reachable
     metadata-map:

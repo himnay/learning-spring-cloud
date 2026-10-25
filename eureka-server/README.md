@@ -1,4 +1,4 @@
-# <span style="color:hsl(201,80%,58%)">eureka-server-1</span>
+# <span style="color:hsl(201,80%,58%)">eureka-server</span>
 
 ## <span style="color:hsl(151,80%,58%)">Table of contents</span>
 
@@ -11,8 +11,8 @@
 7. ⚠️ [Gotchas](#gotchas)
 8. ❓ [Q&A](#qa)
 
-Peer 1 of the two-node service registry for the [learning-spring-cloud](../README.md) demo; [
-`eureka-server-2`](../eureka-server-2/README.md) is the same code on port 8762 (this README covers both). Every other
+Service registry for the [learning-spring-cloud](../README.md) demo, run as a cluster of two or three replicating nodes
+from this one module: the Spring profile (`peer1`, `peer2`, `peer3`) picks the node. Every other
 module (`user-service`, `order-service`, `product-service`, `gateway-service`, `admin-server`) registers here. For how
 the gateway resolves `lb://` IDs against this registry, how Spring Boot Admin discovers instances, and the FAQ on
 AP/CAP, self-preservation and eviction timing, see the [root README](../README.md#faq).
@@ -24,24 +24,25 @@ AP/CAP, self-preservation and eviction timing, see the [root README](../README.m
 | Item                                | Value                                                                                                                                                                                                                                     |
 |-------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Role                                | Netflix Eureka ***service registry*** + dashboard                                                                                                                                                                                         |
-| Port                                | `8761` ([`application.yml`](src/main/resources/application.yml) `server.port`); `eureka-server-2`: `8762`                                                                                                                                 |
+| Port                                | `8761` / `8762` / `8763` for profile `peer1` / `peer2` / `peer3` ([`application.yml`](src/main/resources/application.yml) `server.port`)                                                                                                  |
 | Web stack                           | Servlet (Spring MVC / Tomcat)                                                                                                                                                                                                             |
 | Stack (as of 2026)                  | Spring Boot 4.1.1, Spring Cloud 2025.1.x (banner says 2025.1.2), Java 27                                                                                                                                                                  |
 | Main class                          | [`EurekaServerApplication`](src/main/java/com/learning/discovery/eureka/EurekaServerApplication.java) — `@EnableEurekaServer` + `@SpringBootApplication`                                                                                  |
 | Dependencies ([`pom.xml`](pom.xml)) | `spring-cloud-starter-netflix-eureka-server`, `spring-boot-starter-actuator`, `spring-boot-starter-security`, `spring-boot-starter-quartz`, `jolokia-support-springboot` 2.6.3; tests: `spring-boot-starter-test`, `spring-security-test` |
 
-- ***Two peer modules*** — `eureka-server-1` (:8761) and `eureka-server-2` (:8762) are copies that differ only in
-  `server.port`, `eureka.instance.hostname`, the peer URL in `defaultZone`, the log file name and the banner
-  (`diff -r eureka-server-1/src eureka-server-2/src`). Each lists the *other* in `defaultZone`, so every
-  register/heartbeat/cancel one receives is replicated to the other. ***Change both*** when editing code or config.
-  Details in [Run both peers](#run-peers).
-- ***Registers with its peer*** — `eureka.client.register-with-eureka: true` so `admin-server` (which discovers apps
-  *from* Eureka) lists `EUREKA-SERVER` (2 instances) alongside the other services. Both keep
+- ***One module, one profile per node*** — `peer1` (:8761, hostname `localhost`), `peer2` (:8762, `127.0.0.1`),
+  `peer3` (:8763, `127.0.0.2`). Each profile section of [`application.yml`](src/main/resources/application.yml) sets
+  only `server.port` and `eureka.instance.hostname`; everything else is shared. `peer1` is also the default: its section
+  is activated by `peer1 | !(peer2 | peer3)`, so a plain run (IDE, `spring-boot:run`, tests, `prod` alone) is node 1.
+  All nodes share one `defaultZone` listing the three; every register/heartbeat/cancel a node receives is replicated to
+  the other two. Details in [Run a cluster](#run-cluster).
+- ***Registers with the cluster*** — `eureka.client.register-with-eureka: true` so `admin-server` (which discovers apps
+  *from* Eureka) lists `EUREKA-SERVER` (one instance per running node) alongside the other services. All nodes keep
   `spring.application.name: eureka-server`: the dashboard counts a peer as `available-replicas` only if it finds it
   among *its own* app's instances.
-- ***Fetch the registry: only as a peer*** — standalone keeps `fetch-registry: false` (this node *is* the registry); the
-  peer profiles set it `true`, because on startup a node copies its initial registry from the other peer through its own
-  Eureka client — without it a restarted peer comes up empty.
+- ***Fetch the registry*** — `fetch-registry: true`: on startup a node copies the registry its own Eureka client fetched
+  from a peer — without it a restarted node comes up empty. Spring Cloud enables that copy
+  (`eureka.server.registry-sync-retries: 5`) whenever `register-with-eureka` is true.
 - ***Self-preservation: on*** — `enable-self-preservation: ${EUREKA_SELF_PRESERVATION:true}`, so the dashboard no longer
   shows `THE SELF PRESERVATION MODE IS TURNED OFF...` and a network blip can't mass-evict the registry. Threshold
   `EUREKA_RENEWAL_THRESHOLD` defaults to `0.5` locally (killing one or two services in a ~8-instance demo still evicts
@@ -56,8 +57,9 @@ AP/CAP, self-preservation and eviction timing, see the [root README](../README.m
   center" on the dashboard. Labels only — they change no registry behaviour.
 - ***No other eviction tuning*** — lease renewal/expiry and the eviction timer run on Eureka defaults; only
   self-preservation is overridden.
-- ***Hostname*** — `eureka-server-1` is `localhost`, `eureka-server-2` is `127.0.0.1`: peers need distinct hostnames,
-  and these two resolve everywhere without an `/etc/hosts` entry.
+- ***Hostname*** — `peer1` is `localhost`, `peer2` `127.0.0.1`, `peer3` `127.0.0.2`: nodes need distinct hostnames,
+  and all three are loopback without an `/etc/hosts` entry. Linux and Windows route all of `127.0.0.0/8` to loopback;
+  on macOS run `sudo ifconfig lo0 alias 127.0.0.2` once before starting `peer3`.
 - ***Startup banner*** — [`banner.txt`](src/main/resources/banner.txt) prints project metadata and the dashboard URL.
 
 <a id="run-it"></a>
@@ -68,10 +70,12 @@ Start it ***first*** — every other module needs somewhere to register (full or
 root [Run order](../README.md#run-order)).
 
 ```bash
-mvn -pl eureka-server-1 spring-boot:run &
-mvn -pl eureka-server-2 spring-boot:run &
-# or with custom credentials (same on both, and on every client)
-ACTUATOR_USER=ops ACTUATOR_PASSWORD=s3cret mvn -pl eureka-server-1 spring-boot:run
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer1 &   # :8761, also the default
+# once it is up (it builds eureka-server/target, which the other nodes reuse):
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer2 &   # :8762
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer3 &   # :8763, optional
+# or with custom credentials (same on every node, and on every client)
+ACTUATOR_USER=ops ACTUATOR_PASSWORD=s3cret mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer1
 ```
 
 | What              | URL                                            | Auth                                          |
@@ -87,23 +91,49 @@ curl -u admin:admin -H 'Accept: application/json' http://localhost:8761/eureka/a
 curl http://localhost:8761/actuator/health
 ```
 
-<a id="run-peers"></a>
+<a id="run-cluster"></a>
 
-### Run both peers
+### Run a cluster (2 or 3 nodes)
+
+| Profile | Port | `eureka.instance.hostname` | Dashboard             | Log file                      |
+|---------|------|----------------------------|-----------------------|-------------------------------|
+| `peer1` | 8761 | `localhost`                | http://localhost:8761 | `logs/eureka-server-8761.log` |
+| `peer2` | 8762 | `127.0.0.1`                | http://localhost:8762 | `logs/eureka-server-8762.log` |
+| `peer3` | 8763 | `127.0.0.2`                | http://localhost:8763 | `logs/eureka-server-8763.log` |
+
+- ***Pick the node per process*** — `-Dspring-boot.run.profiles=peer2` (Maven), `--spring.profiles.active=peer2` (jar),
+  `SPRING_PROFILES_ACTIVE=peer2` (env), or *Active profiles* in an IntelliJ Spring Boot run configuration (one per
+  node, module `eureka-server`). Add `prod` as `peer2,prod`; no peer profile at all means `peer1`.
+- ***One `target/` for all nodes*** — three `spring-boot:run` started at the same moment compile into the same
+  `eureka-server/target`; start `peer1` first, or build once and run the jar:
 
 ```bash
-mvn -pl eureka-server-1 spring-boot:run &   # :8761
-mvn -pl eureka-server-2 spring-boot:run &   # :8762
+mvn -pl eureka-server package -DskipTests
+java -jar eureka-server/target/eureka-server-0.0.1-SNAPSHOT.jar --spring.profiles.active=peer1 &
+java -jar eureka-server/target/eureka-server-0.0.1-SNAPSHOT.jar --spring.profiles.active=peer2 &
+java -jar eureka-server/target/eureka-server-0.0.1-SNAPSHOT.jar --spring.profiles.active=peer3 &
 ```
 
-- ***Clients list both*** — every module's `defaultZone` is `...@localhost:8761/eureka/,...@127.0.0.1:8762/eureka/`; a
-  client talks to the first reachable one and fails over to the next. `zipkin-server` takes a single URI only, so it
-  points at `eureka-server-1` (`localhost:8761`).
-- ***Check replication*** — each dashboard's *DS Replicas* shows the other node, and *General Info* lists it under
-  `available-replicas`; an app that registers with one node appears on both; `EUREKA-SERVER` shows 2 instances.
-- ***Startup noise*** — whichever peer starts first logs `Connection refused` for the other until it's up; harmless, it
-  retries every 10–30 s.
-- ***Log files*** — `logs/eureka-server-1.log` / `logs/eureka-server-2.log`.
+- ***Every node lists all three*** — the shared `defaultZone` is
+  `...@localhost:8761/eureka/,...@127.0.0.1:8762/eureka/,...@127.0.0.2:8763/eureka/`. For replication a node drops the
+  entry whose host is its own hostname (log line `Adding new peer nodes [...]` shows the other two); its own Eureka
+  client may register with any of the three, itself included.
+- ***Clients list all three*** — every client module's `defaultZone` is the same list. Eureka 2.x shuffles it per
+  client, so clients spread over the nodes; each sticks with one and fails over to the next on errors.
+  `zipkin-server` takes a single URI only, so it points at `peer1` (`localhost:8761`).
+- ***Check replication*** — each dashboard's *DS Replicas* shows the other nodes, and *General Info* lists them under
+  `available-replicas`; an app that registers with one node appears on all; `EUREKA-SERVER` shows one instance per
+  running node.
+- ***Two nodes are enough*** — `peer1` + `peer2` give HA too; `peer3` is then a configured node that's down: both
+  dashboards list it under `unavailable-replicas`, and each running node logs
+  `Network level connection to peer 127.0.0.2; retrying after delay` (with a `Connection refused` stack trace) every
+  10 s. Starting `peer3` ends it. Same for any node you stop.
+- ***Startup*** — a node copies the registry from a peer that's already up (`Got N instances from neighboring DS node`),
+  so a restarted node is complete from its first request. On a cold start no peer is up yet: the nodes log
+  `Connection refused` for each other, the copy retries after 30 s (`registry-sync-retry-wait-ms`), and
+  `Started Eureka Server` comes ~30 s after `Tomcat started`; the node serves requests meanwhile.
+- ***Log files*** — `logs/eureka-server-8761.log`, `-8762.log`, `-8763.log` (`logging.file.name` is named after the
+  port, so nodes never share a file).
 
 - ***Credentials*** — `spring.security.user.name`/`password` default to `admin`/`admin`, overridable via env vars
   `ACTUATOR_USER` / `ACTUATOR_PASSWORD`. The user gets role `ACTUATOR`.
@@ -152,8 +182,9 @@ eureka:
       defaultZone: http://admin:admin@localhost:8761/eureka/
 ```
 
-- ***This node uses the same trick for its self-registration*** — its own `defaultZone` is
-  `http://${spring.security.user.name}:${spring.security.user.password}@${eureka.instance.hostname}:${server.port}/eureka/`.
+- ***The nodes use the same trick among themselves*** — the shared `defaultZone` embeds
+  `${spring.security.user.name}:${spring.security.user.password}` in all three URLs, for a node's own registration and
+  for replication to its peers alike.
 - ***SBA credentials via metadata*** — `eureka.instance.metadata-map.user.name` / `user.password` publish the actuator
   credentials in the registry entry; `admin-server` reads them and uses them as Basic auth when polling `/actuator/**`
   (fallback: `spring.boot.admin.instance-auth.default-*` — root [§10](../README.md#security-and-sba-features)).
@@ -189,7 +220,7 @@ Basic auth. `health.show-details: always`.
 | `health`        | Health (details shown)             | `management.endpoint.health.show-details: always`; public                                                                                                                                          |
 | `info`          | Info                               | public                                                                                                                                                                                             |
 | `heapdump`      | Heap Dump                          | `management.endpoint.heapdump.access: unrestricted` (Boot 3.5+ defaults to `none`, as of 2026)                                                                                                     |
-| `logfile`       | Logfile                            | `logging.file.name: logs/${spring.application.name}.log`                                                                                                                                           |
+| `logfile`       | Logfile                            | `logging.file.name: logs/${spring.application.name}-${server.port}.log` (one file per node)                                                                                                        |
 | `env`           | Environment                        | exposed; `management.endpoint.env.post.enabled: true` enables the SBA "Update" form (POST, Spring Cloud Context)                                                                                   |
 | `shutdown`      | Shutdown button                    | `management.endpoint.shutdown.access: unrestricted`                                                                                                                                                |
 | `restart`       | Restart button                     | `management.endpoint.restart.access: unrestricted` (Spring Cloud Context)                                                                                                                          |
@@ -237,8 +268,8 @@ Basic auth. `health.show-details: always`.
   scheduler.
 - ***Not to be confused with Eureka client heartbeats*** — this job only writes a log line.
 
-**File logging** — `logging.file.name: logs/eureka-server.log` (peers: `eureka-server-1.log` / `-2.log`) (relative to
-the working directory) is what switches on `/actuator/logfile`.
+**File logging** — `logging.file.name: logs/${spring.application.name}-${server.port}.log` (one file per node:
+`eureka-server-8761.log`, ...; relative to the working directory) is what switches on `/actuator/logfile`.
 
 **Annotated [`application.yml`](src/main/resources/application.yml) excerpt:**
 
@@ -254,26 +285,22 @@ spring:
   quartz:
     job-store-type: memory                  # RAMJobStore for HeartbeatJob
 
-server:
-  port: 8761
-
 eureka:
   instance:
-    hostname: localhost
     metadata-map:                           # SBA reads these to poll /actuator
       user.name: ${spring.security.user.name}
       user.password: ${spring.security.user.password}
   client:
-    register-with-eureka: true              # appear in SBA
-    fetch-registry: false                   # this node is the registry
-    service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@${eureka.instance.hostname}:${server.port}/eureka/
+    register-with-eureka: true              # appear in SBA; also turns on the startup registry copy
+    fetch-registry: true                    # what that copy reads
+    service-url:                            # the whole cluster (credentials shortened here)
+      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
   server:
     enable-self-preservation: true          # no mass eviction on a network blip; threshold 0.5 locally
 
 logging:
   file:
-    name: logs/${spring.application.name}.log   # backs /actuator/logfile
+    name: logs/${spring.application.name}-${server.port}.log   # one per node, backs /actuator/logfile
 
 management:
   endpoint:
@@ -283,6 +310,19 @@ management:
     env:      { post: { enabled: true } }
     health:   { show-details: always }
     heapdump: { access: unrestricted }
+
+---
+spring.config.activate.on-profile: "peer1 | !(peer2 | peer3)"   # node 1, and the default
+server.port: 8761
+eureka.instance.hostname: localhost
+---
+spring.config.activate.on-profile: peer2
+server.port: 8762
+eureka.instance.hostname: 127.0.0.1
+---
+spring.config.activate.on-profile: peer3
+server.port: 8763
+eureka.instance.hostname: 127.0.0.2
 ```
 
 <a id="tests"></a>
@@ -301,14 +341,18 @@ management:
 | `registryApiAcceptsBasicAuth`            | `GET /eureka/apps` with Basic → 200                                                                              |
 | `sbaEndpointsAreExposedBehindAuth`       | `/actuator/quartz` anonymous → 401; `quartz`, `httpexchanges`, `auditevents`, `jolokia`, `sbom` with Basic → 200 |
 
-- ***Why `register-with-eureka=false` and `fetch-registry=false` in the test*** — `defaultZone` points at the other
-  peer, which isn't running during the test; registering or fetching would just spam connection errors. The test boots
+[`PeerProfilesTests`](src/test/java/com/learning/discovery/eureka/PeerProfilesTests.java) — loads `application.yml`
+only (`ConfigDataEnvironmentPostProcessor.applyTo`, no server) and checks which node each profile combination resolves
+to: port, `eureka.instance.hostname` and log file for no profile, `peer1`, `peer2`, `peer3`, `prod` and `peer3,prod`.
+
+- ***Why `register-with-eureka=false` and `fetch-registry=false` in the test*** — `defaultZone` lists the other nodes,
+  which aren't running during the test; registering or fetching would just spam connection errors. The test boots
   the node standalone.
 - ***Why `startup` isn't tested*** — `BufferingApplicationStartup` is installed only in `main()`; `@SpringBootTest`
   doesn't run `main`, so the endpoint isn't there.
 
 ```bash
-mvn -pl eureka-server-1,eureka-server-2 test
+mvn -pl eureka-server test
 ```
 
 <a id="gotchas"></a>
@@ -338,7 +382,8 @@ mvn -pl eureka-server-1,eureka-server-2 test
   `setStatusOverSendError` so the 404 stays bare (test `heartbeatForUnknownInstanceIsBare404`).
 - ***Peers need distinct hostnames*** — Eureka compares only the host of a peer URL with its own
   `eureka.instance.hostname` (not the port); two nodes both named `localhost` treat each other as "me" and never
-  replicate. Hence `localhost` vs `127.0.0.1` — don't "tidy" them to the same name.
+  replicate. Hence `localhost` / `127.0.0.1` / `127.0.0.2` — don't "tidy" them to the same name, and give a fourth
+  node its own (e.g. `127.0.0.3`). The dashboard's *DS Replicas* list is keyed by host too.
 - ***`logs/` is relative*** — the log file lands under whatever directory you launched from.
 
 <a id="qa"></a>

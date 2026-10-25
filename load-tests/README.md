@@ -36,4 +36,4 @@ k6 run -e BASE_URL=http://localhost:8080 -e ACTUATOR_USER=ops -e ACTUATOR_PASSWO
 - ***Watch it live*** — Zipkin (http://localhost:9411) shows the traces, Spring Boot Admin (http://localhost:8084) the
   metrics; add `--out web-dashboard` for k6's own live dashboard at http://localhost:5665.
 - ***Eureka failover test*** — run `PROFILE=load` and stop one eureka node mid-run: requests keep succeeding because
-  clients serve from their cached registry and fail over to the other peer.
+  clients serve from their cached registry and fail over to another node.
