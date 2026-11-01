@@ -5,16 +5,9 @@ server:
 spring:
   application:
     name: order-service
-  # Datasource comes from order-service/docker-compose.yaml (spring-boot-docker-compose starts Postgres and wires
-  # the URL/credentials); Flyway runs db/migration/V*.sql on startup. The path is relative to the working
-  # directory, which is the repo root: IntelliJ run configs use it, and so does spring-boot-maven-plugin
-  # (<workingDirectory> in pom.xml).
   docker:
     compose:
       file: order-service/docker-compose.yaml
-  # Fallback for `java -jar`: spring-boot-docker-compose is an optional dependency, so the packaged jar doesn't
-  # contain it and nothing wires the URL. These match order-service/docker-compose.yaml; when compose support is active
-  # (IDE, spring-boot:run) its connection details take precedence. Override with DB_URL / DB_USER / DB_PASSWORD.
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5433/orders}
     username: ${DB_USER:orders}

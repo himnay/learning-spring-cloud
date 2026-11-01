@@ -40,15 +40,9 @@ eureka:
       tags.environment: ${APP_ENV:local}   # SBA shows tags.* as badges in the application list
       tags.tier: infra
   client:
-    # register with the cluster (so SBA lists the registry too): whichever node takes the registration, this one
-    # included, replicates it to the others
     register-with-eureka: true
-    # on startup this node copies the registry its client fetched from a peer; without it a restart comes up empty.
-    # register-with-eureka makes Spring Cloud set eureka.server.registry-sync-retries to 5: with no peer up yet (cold
-    # cluster) the copy retries after 30 s, so "Started Eureka Server" comes ~30 s after Tomcat — README "Run a cluster"
     fetch-registry: true
     service-url:
-      # the whole cluster; every client module lists the same three
       defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.1:8762/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.2:8763/eureka/
   server:
     # on everywhere: a network blip can't mass-evict the registry (and the dashboard drops the
