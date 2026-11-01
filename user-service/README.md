@@ -12,6 +12,11 @@
 8. ⚠️ [Gotchas](#gotchas)
 9. ❓ [Q&A](#qa)
     - 9.1 [What are the different ways Spring Boot Admin can call `user-service`, and what does `user-service` need for each?](#qa-sba-call-options)
+    - 9.2 🔥 [`order-service` maps this API onto its own `UserSummary(id, name, email)` record — what happens when `user-service` adds, renames or retypes a field, and how do you catch it before production?](#qa-contract-drift-usersummary)
+    - 9.3 🔥 [Add `POST /api/users` on top of `email … UNIQUE` — why do case, a check-then-insert race and the current `id` column each break it, and what should the API return?](#qa-email-uniqueness-create)
+    - 9.4 🔥 [Any authenticated caller can read any user by a sequential id — what is this vulnerability called, why can't the gateway fix it, and how do you fix it in this service?](#qa-object-level-authorization)
+    - 9.5 🔥🔥 [Reads on `user-service` grow 20× — do you add Postgres read replicas, and if so how do you route reads, keep read-your-writes and survive a failover?](#qa-read-replicas-routing)
+    - 9.6 🔥🔥 [A user asks to be erased (GDPR) — design deletion across `user-service`, `order-service`, logs, traces and backups](#qa-gdpr-erasure-design)
 
 Eureka client exposing a read-only `/api/users` API. One of the 6 modules of the
 service-discovery demo — see the root [../README.md](../README.md) for the
@@ -493,3 +498,204 @@ Kubernetes `Service`; name a separate actuator port `management` in the Service'
   hence `csrf.ignoringRequestMatchers("/actuator/**")` in this module's `SecurityConfig`.
 - ***Public paths*** — `/actuator/health/**` and `/actuator/info` are `permitAll()` here, so status still shows even
   with wrong credentials; the other views then fail with `401`.
+
+<a id="qa-contract-drift-usersummary"></a>
+
+**Q2. 🔥 `order-service` maps this API onto its own `UserSummary(id, name, email)` record. What happens when
+`user-service` adds, renames or retypes a field, and how do you catch it before production?**
+
+- ***Every kind of break looks the same from outside: `"user": null`, or a null field, and no error anywhere.***
+  `UserClient.fetchUser` catches `RestClientException` and returns `Optional.empty()`, and Jackson fills missing
+  properties with `null`.
+
+| Change in `User` (this service)        | Effect in `order-service`                                                                                         |
+|----------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| Add `phone`                            | usually harmless: unknown properties are ignored, as long as the mapper doesn't fail on them (see below)          |
+| Rename `name` → `fullName`             | ***silent data loss***: `UserSummary.name` is `null`, response still 200                                           |
+| Retype `id` `Long` → UUID string       | deserialisation fails → a `RestClientException` subtype → caught → `user: null`, so it looks like an outage      |
+| Move or remove `/api/users/{id}`       | 404 → `HttpClientErrorException` → caught → `user: null`                                                           |
+
+- ***Which mapper decides?*** `UserClient` uses a plain `RestClient.builder()` from `order-service`'s
+  `LoadBalancerConfig`, ***not*** Boot's auto-configured builder. So `spring.jackson.*` settings don't apply to it;
+  the framework's default converter configuration decides whether unknown properties fail. Don't assume, pin it with a
+  test.
+- ***Catch it before production***:
+  - ***Consumer-driven contract tests*** (Spring Cloud Contract or Pact). `order-service` publishes "I call
+    `GET /api/users/{id}` and need `id`, `name`, `email`", and `user-service`'s build fails if it breaks that.
+  - ***OpenAPI diff in CI*** — springdoc already serves `/v3/api-docs`. Diff the generated spec against the last
+    release and fail on removed or renamed fields and type changes.
+  - ***Tolerant reader on the consumer*** — read only the fields you need, ignore unknown ones. ***Additive-only changes
+    on the provider***; breaking changes go to a new version (`/api/v2/users` or a versioned media type), and both run
+    until consumers have moved.
+- ***Make it visible at runtime*** — count fallbacks by cause (404 vs 5xx vs deserialisation) in `UserClient`, and alert
+  on deserialisation errors. They are never transient. See
+  [order-service Q5](../order-service/README.md#qa-create-order-design) for splitting the error cases.
+- ***Data minimisation while you're there*** — `/with-user` probably only needs `name` for display. Every extra field in
+  `UserSummary` (here, `email`) is PII copied into another service's responses.
+
+<a id="qa-email-uniqueness-create"></a>
+
+**Q3. 🔥 Add `POST /api/users` on top of `email … UNIQUE`. Why do case, a check-then-insert race and the current `id`
+column each break it, and what should the API return?**
+
+- ***Let the database enforce uniqueness on a normalised value, and turn the constraint violation into a `409`.*** A
+  pre-check in Java is UX, not a guard.
+- ***Case*** — `UNIQUE` on `VARCHAR` is case-sensitive, so `Alice@Example.com` and `alice@example.com` are two
+  accounts. Fix: a unique index on `lower(email)` (or the `citext` type), and normalise on write (trim, lower-case).
+- ***Race*** — `existsByEmail()` followed by `save()` lets two concurrent requests both pass the check. One insert then
+  violates the constraint → `DuplicateKeyException` (a `DataIntegrityViolationException`). Today that reaches
+  `ApiExceptionHandler`'s catch-all and becomes a ***500 "Unexpected error"***. Map it explicitly:
+
+```java
+@ExceptionHandler(DuplicateKeyException.class)
+ProblemDetail duplicate(DuplicateKeyException ex) {
+    ProblemDetail p = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "A user with this email already exists");
+    p.setTitle("Conflict");
+    return p;
+}
+```
+
+- ***`id` has no generator*** — `users.id` is `BIGINT PRIMARY KEY` (V1) and `User` is a record with `@Id Long id`.
+  Spring Data JDBC treats an entity with a non-null id as ***existing***, so `save(new User(6L, …))` issues an `UPDATE`
+  that matches 0 rows and throws. Options: a Flyway migration to `GENERATED BY DEFAULT AS IDENTITY` (restart above the
+  seeded 5) and save with `id = null`, or keep client ids and call `JdbcAggregateTemplate.insert(...)` /
+  implement `Persistable`.
+- ***What to return***:
+
+| Case                              | Response                                                                  |
+|-----------------------------------|---------------------------------------------------------------------------|
+| Created                           | `201` + `Location: /api/users/{id}`                                        |
+| Invalid email format              | `400` (validation)                                                        |
+| Duplicate, admin/internal API     | `409` ProblemDetail                                                       |
+| Duplicate, ***public sign-up***   | the same `202 "check your inbox"` as a fresh sign-up, plus an email to the owner. A `409` here tells anyone which emails are registered (account enumeration) |
+
+- ***Retries*** — a client retrying after a timeout gets `409` for its own successful create. Accept an
+  `Idempotency-Key` ([order-service Q5](../order-service/README.md#qa-create-order-design)), or return `200` with the
+  existing user when the payload is identical.
+
+<a id="qa-object-level-authorization"></a>
+
+**Q4. 🔥 Any authenticated caller can read any user by a sequential id. What is this vulnerability called, why can't
+the gateway fix it, and how do you fix it in this service?**
+
+- ***Broken Object Level Authorization (BOLA / IDOR) — #1 in the OWASP API Security Top 10 (2023 edition).***
+  `GET /api/users/{id}` checks *who you are* (Basic auth) but not *whether this object is yours*. Ids are 1, 2, 3…,
+  so a loop dumps every name and email. `GET /api/users` does it in one call.
+- ***Why the shared `admin` user hides it*** — today every caller is the same principal, so "own data" means
+  nothing. The credential problem itself is covered in root
+  [FAQ 7.10](../README.md#faq-shared-credentials-blast-radius). Even after per-user tokens arrive, BOLA remains
+  unless the service checks ownership.
+- ***Why the gateway can't fix it*** — it matches paths, not ownership. Knowing that user 42 owns `/api/users/42`
+  (or, later, an order) needs this service's data. Coarse rules belong at the edge; object rules belong in the
+  service that owns the object.
+- ***Fix in `user-service`*** (after moving to JWTs):
+
+```java
+@EnableMethodSecurity   // on a @Configuration class
+// ...
+@PreAuthorize("#id.toString() == authentication.token.claims['user_id'] or hasAuthority('SCOPE_users:read:any')")
+@GetMapping("/api/users/{id}")
+User getUser(@PathVariable Long id) { ... }
+```
+
+  - End users read only themselves. `order-service` gets a client-credentials token with `users:read:any`, so
+    `/with-user` keeps working, but now as an explicit, auditable permission.
+  - `GET /api/users` (the full list) needs an admin scope, plus pagination.
+  - Return ***404, not 403***, for someone else's id, so the API doesn't confirm which ids exist.
+- ***Non-sequential public ids (UUIDs) slow enumeration down but aren't authorization.*** Use them as well, not
+  instead.
+- ***Test it*** — a slice test per endpoint: user A requests B's id → 404, and the service token → 200. BOLA comes back
+  every time someone adds an endpoint and forgets the rule; this test catches that.
+
+<a id="qa-read-replicas-routing"></a>
+
+**Q5. 🔥🔥 Reads on `user-service` grow 20×. Do you add Postgres read replicas, and if so how do you route reads, keep
+read-your-writes and survive a failover?**
+
+***First prove the database is the bottleneck. Primary-key lookups are cheap, so replicas are mostly for
+availability and geography, not throughput.*** If you add them, route read-only transactions to the replica and pin
+"just wrote" reads to the primary.
+
+- ***Estimate before building*** — `findById` is an index lookup well under a millisecond. At 5,000 req/s × ~1 ms
+  ≈ ***5 busy connections***, inside Hikari's default pool of 10. The likelier limits are Tomcat threads, the pool
+  size, and serialisation. Cheaper first steps:
+  - a short-TTL cache for user profiles (they rarely change);
+  - pagination on `GET /api/users`;
+  - more `user-service` instances (the Eureka load balancer already spreads `order-service` and gateway calls).
+- ***Routing, if you do add replicas***:
+  - an `AbstractRoutingDataSource` with `primary` and `replica` targets, keyed on
+    `TransactionSynchronizationManager.isCurrentTransactionReadOnly()`;
+  - wrapped in a `LazyConnectionDataSourceProxy`, so the connection is fetched ***after*** the transaction's
+    read-only flag is set;
+  - `@Transactional(readOnly = true)` on read services. Spring Data JDBC's repository `find*` methods already run
+    read-only.
+- ***Read-your-writes*** — replicas lag (milliseconds normally, seconds or more under load). A user updates their
+  email, and the next GET returns the old one:
+
+| Strategy                                         | Cost                                                    |
+|--------------------------------------------------|---------------------------------------------------------|
+| "Own profile" reads always go to the primary     | simple; most reads still go to the replica              |
+| Stick to the primary for N seconds after this user writes (flag in the token/session/cache) | needs shared state across instances |
+| Wait until the replica has replayed the write's WAL position (compare LSNs) | exact, but complex and adds latency    |
+
+- ***Failover*** — the primary dies and a replica is promoted (by your HA tooling or the managed service). pgjdbc
+  accepts several hosts and `targetServerType=primary` (or `preferSecondary` for the read pool), so connections find
+  the new primary without a config change. In-flight transactions fail, so retry idempotent reads only.
+- ***Traps in this module***:
+  - ***Readiness*** — `include: readinessState,db`. If the db health check covers the replica too, a replica outage
+    takes every instance out of rotation, even though the primary could serve reads. Same lesson as
+    [order-service Q3](../order-service/README.md#qa-postgres-outage-readiness).
+  - ***Flyway*** must run against the primary only. Give it its own datasource or URL.
+  - ***docker-compose*** starts a single Postgres (`postgres:18` on 5434). Testing lag needs a real replica (a
+    streaming-replication container pair), or the read-your-writes bug only appears in production.
+- ***Monitor*** — replica lag (seconds and bytes), share of reads on the replica, pool wait time per target, and
+  stale-read complaints after profile updates.
+
+<a id="qa-gdpr-erasure-design"></a>
+
+**Q6. 🔥🔥 A user asks to be erased (GDPR). Design deletion across `user-service`, `order-service`, logs, traces and
+backups.**
+
+***`user-service` owns the person. Erase there, publish an erasure event other services must act on, keep only
+pseudonymous ids elsewhere, and handle what can't be edited (logs, backups) with retention limits or
+crypto-shredding.*** GDPR asks for erasure without undue delay, within one month by default (as of 2026). Records you
+are legally required to keep (e.g. invoices) are an exception.
+
+- ***Map the personal data first*** (this repo):
+
+| Where                                        | What                                     | Action                                                                 |
+|----------------------------------------------|------------------------------------------|------------------------------------------------------------------------|
+| `users` (this service's Postgres)            | name, email                              | delete, or anonymise (`email = 'erased-<id>@invalid'`, which keeps the `UNIQUE` constraint happy) |
+| `orders.user_id` (`order-service`)           | a pseudonymous id, no name or email      | keep: orders are financial records; once the user row is gone, the id no longer identifies anyone |
+| `/with-user` responses                       | name + email, assembled on each call     | nothing stored; after erasure `user-service` returns 404, so `user: null` |
+| `logs/user-service.log`, Zipkin traces, `httpexchanges` | ids in URLs; PII only if someone logs it | keep PII out of logs (log ids, not emails); rely on retention limits (Zipkin here is in-memory) |
+| Heap dumps, Postgres backups                 | everything                               | can't be edited: retention window + an erasure ledger, or crypto-shredding |
+
+- ***Flow***:
+
+```mermaid
+flowchart LR
+    R[DELETE /api/users/42] --> T[user-service tx:<br/>anonymise row + outbox UserErased 42]
+    T --> L[(erasure ledger:<br/>42, requested, per-service status)]
+    T --> E[UserErased event]
+    E --> O[order-service:<br/>scrub any snapshot PII,<br/>evict caches, ack]
+    E --> X[other consumers: ack]
+    O --> L
+    X --> L
+```
+
+- ***Outbox + at-least-once*** — the erase and the event commit together. Consumers are idempotent (erasing twice is
+  fine) and acknowledge into the ledger, so you can show the regulator when every copy was handled.
+- ***Snapshots*** — if orders later copy the customer's name or address (as product data is snapshotted in
+  [product-service Q6](../product-service/README.md#qa-order-product-reference)), those columns are PII. Scrub them,
+  or keep them under the legal-retention exception with restricted access.
+- ***Backups*** — you can't rewrite a backup:
+  - ***Ledger replay*** — keep the erased ids (pseudonymous). After any restore, re-apply erasures before the database
+    goes live.
+  - ***Crypto-shredding*** — encrypt PII columns with a per-user key held in a key store, and delete the key to erase.
+    Every backup becomes unreadable for that user at once. The cost: key management on every read.
+- ***Edge cases*** — the same email re-registering (allowed once erased), erasure while an order is in flight (finish
+  or cancel first), and a request coming in through a service that doesn't own the user (forward it to
+  `user-service`; never delete locally).
+- ***Monitor*** — ledger entries older than N days that aren't complete, consumers that never ack, and a periodic scan
+  of logs for email patterns (a PII-leak regression test).

@@ -20,6 +20,11 @@
     - 11.5 [Can we avoid `spring-boot-admin-starter-client` in every service and rely on Eureka alone?](#qa-eureka-only)
     - 11.6 [What are the `AuditEventRepository` and `HttpExchangeRepository` beans in `ActuatorConfig` for?](#qa-actuator-repositories)
     - 11.7 [Can we use Basic auth to log in to the SBA UI but OAuth2 towards the backend services?](#qa-basic-ui-oauth-backend)
+    - 11.8 🔥 [`SecurityConfig` exempts `/instances/**` and `/actuator/**` from CSRF — what does a malicious page do with a logged-in SBA session, and how narrow should the exemption be?](#qa-csrf-exemption-scope)
+    - 11.9 🔥 [Someone clicks Heap Dump on a production `order-service` in SBA — what happens to that instance, its callers and the data?](#qa-heapdump-click-production)
+    - 11.10 🔥 [Why is SBA a weak primary alerting system, even after you add a notifier?](#qa-sba-as-alerting)
+    - 11.11 🔥🔥 [Run admin-server as two instances behind a load balancer — what breaks with this module's in-memory state, and is HA worth it at all?](#qa-sba-high-availability)
+    - 11.12 🔥🔥 [SBA suddenly shows the three Postgres-backed services OFFLINE, while Eureka shows them UP and the gateway serves traffic — debug it](#qa-mass-offline-debug)
 
 Spring Boot Admin (SBA) dashboard for the Eureka demo. Back to the project
 overview: [../README.md](../README.md).
@@ -728,3 +733,169 @@ Things to know:
   use OAuth2 login with token relay, which means giving up Basic for the UI.
 - ***Eureka is a third path*** — registration and heartbeats to `:8761` / `:8762` / `:8763` still use Basic via `defaultZone`;
   moving those to OAuth2 is a separate change.
+
+<a id="qa-csrf-exemption-scope"></a>
+
+**Q8. 🔥 `SecurityConfig` exempts `/instances/**` and `/actuator/**` from CSRF. What does a malicious page do with a
+logged-in SBA session, and how narrow should the exemption be?**
+
+- ***`/instances/**` is wider than SBA needs, and it covers the proxy.*** Every UI action on a service goes through
+  `/instances/{id}/actuator/**` on admin-server ([Q1](#qa-sba-poll-or-push)), so the exemption also drops CSRF
+  checks on `POST .../actuator/shutdown`, `.../env`, `.../refresh` and `.../loggers` for ***every*** instance. The only
+  session check left on those requests is the session cookie.
+- ***Attack*** — an engineer is logged in to `:8084`. A page they open sends
+  `POST http://localhost:8084/instances/<id>/actuator/shutdown`. The browser attaches the `SESSION` cookie and SBA
+  forwards the call with the Basic credentials from Eureka metadata ([§3.5](#security)). `order-service` stops.
+- ***What stops it today is SameSite, not CSRF.*** The WebFlux session cookie defaults to `SameSite=Lax`, so a
+  ***cross-site*** POST carries no cookie. But SameSite ignores ports: any page on `localhost:*` is ***same-site***
+  (the gateway's Swagger UI on `:8080`, a dev server on `:3000`). One XSS on any of them, or a mistake on an internal
+  domain shared by many apps, and SameSite does nothing.
+- ***`/actuator/**` here is admin-server's own actuator***, so the same trick can call `POST /actuator/shutdown` on
+  admin-server, or update its env.
+- ***Narrow it to what the SBA reference config shows*** (as of SBA 4.x, 2026):
+
+| Exempt                       | Why                                               |
+|------------------------------|---------------------------------------------------|
+| `POST /instances`            | SBA client self-registration (not used here)      |
+| `DELETE /instances/*`        | SBA client deregistration (one path segment only) |
+| `/actuator/**`               | machine callers of admin-server's own actuator    |
+
+- ***The UI doesn't need the wider rule.*** The `XSRF-TOKEN` cookie plus the plain (non-XOR) request handler
+  ([§3.2](#security)) let the SBA app send `X-XSRF-TOKEN` on proxied POSTs. After narrowing, check that changing a
+  log level and the Environment form still work. Community posts that tell you to exempt `/instances/**` are usually
+  working around a missing token.
+- ***Defence in depth*** — add an `Origin`/`Referer` check on unsafe methods, require a separate role for the
+  destructive proxied endpoints, and turn `shutdown`/`env` POST off on the services in prod (root
+  [FAQ 7.10](../README.md#faq-shared-credentials-blast-radius)).
+
+<a id="qa-heapdump-click-production"></a>
+
+**Q9. 🔥 Someone clicks Heap Dump on a production `order-service` in SBA. What happens to that instance, its callers
+and the data?**
+
+- ***The JVM stops while the dump is written.*** `order-service` exposes `heapdump` with `access: unrestricted`.
+  Boot's `HeapDumpWebEndpoint` defaults to `live=true`, which runs a ***full GC first***. HotSpot then writes the
+  dump at a safepoint, so all application threads are paused for its length. That takes seconds for a small heap
+  and can take tens of seconds for a multi-GB one.
+- ***Knock-on effects of the pause***:
+  - ***Requests*** — Tomcat threads freeze. The gateway and `order-service`'s callers see latency spikes, or timeouts
+    if the pause is longer than their read timeout.
+  - ***Registry*** — no heartbeats go out (one every 10 s here). If the pause goes past the 30 s lease, the instance
+    can be evicted and then registers again afterwards (timeline in
+    [eureka-server Q2](../eureka-server/README.md#qa-crash-eviction-timeline)).
+  - ***SBA itself*** — its own health polls time out, so the instance flips to OFFLINE. Any notifier would page
+    someone for an outage SBA caused.
+- ***Disk*** — the endpoint writes a temp `.hprof` (about the size of the used heap) to the instance's disk, streams
+  it, then deletes it. In a container that can fill ephemeral storage and get the pod evicted. A second request
+  during a dump waits for a lock (about 10 s) and then gets `429`.
+- ***Data*** — the file holds every live string: the shared `admin` password, the datasource password, sessions,
+  cached orders. It travels through admin-server to a browser download folder. That is a data-handling incident,
+  not just an ops action.
+- ***Production practice***:
+
+| Do                                                                          | Instead of                       |
+|-----------------------------------------------------------------------------|----------------------------------|
+| Don't expose `heapdump` in prod; take dumps with `jcmd <pid> GC.heap_dump` under a break-glass procedure | a button anyone logged in can press |
+| Take the instance out of rotation first (Eureka `OUT_OF_SERVICE`), then dump | dumping a node that serves traffic |
+| `-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=<encrypted volume>`        | trying to catch an OOM by hand  |
+| `?live=false` when you need the garbage too, or want to skip the forced GC   | the default full GC              |
+| Class histogram (`jcmd <pid> GC.class_histogram`) for a first look           | a full dump for "what's big?"    |
+
+<a id="qa-sba-as-alerting"></a>
+
+**Q10. 🔥 Why is SBA a weak primary alerting system, even after you add a notifier?**
+
+- ***It is one observer, polling from one place, holding state in memory.*** Nothing in this module sends alerts
+  today: no notifier is configured, so a status change only shows on screen. Adding mail or chat notifiers fixes
+  delivery but not these structural problems:
+- ***Who watches the watcher*** — if admin-server dies or loses its route to Eureka, every alert stops silently. A
+  dead SBA looks exactly like a healthy system.
+- ***Wrong vantage point*** — OFFLINE means "SBA couldn't reach it". A partition between SBA and one subnet pages
+  you for an outage users don't see ([Q12](#qa-mass-offline-debug)). The reverse case matters more: SBA reaches
+  the instance directly, while users going through the gateway get 502s.
+- ***Instance granularity, not service health*** — one of three `user-service` instances going DOWN is an alert,
+  even though the service is fine. 30 % of requests failing while every `/actuator/health` says UP is no alert at
+  all. SBA has no idea of error rate, latency or SLOs.
+- ***State resets*** — the event store is in memory. After a restart every instance goes UNKNOWN → UP. Notifiers
+  ignore that transition by default (`ignore-changes` defaults include `UNKNOWN:UP`), so a service that is already
+  down when SBA starts may never alert.
+- ***Detection delay*** — Eureka discovery lag plus the 10 s status interval, plus back-off on failing instances
+  ([Q1](#qa-sba-poll-or-push)).
+- ***Better split***:
+
+| Job                     | Tool                                                                                      |
+|-------------------------|-------------------------------------------------------------------------------------------|
+| Paging                  | metrics (e.g. a Prometheus registry, not in these poms yet) + alert rules on error rate / latency SLO burn |
+| Outside-in check        | a synthetic probe through the gateway, run from outside the cluster                       |
+| "Is SBA itself alive?"  | the paging system probes admin-server like any other target                               |
+| Drill-down after a page | SBA: env, loggers, threads, Quartz, logfile                                               |
+
+- ***If SBA does notify*** — wrap the notifier in a reminding notifier for unresolved states and a filtering
+  notifier for maintenance windows, and route OFFLINE to a lower severity than DOWN.
+
+<a id="qa-sba-high-availability"></a>
+
+**Q11. 🔥🔥 Run admin-server as two instances behind a load balancer. What breaks with this module's in-memory state,
+and is HA worth it at all?**
+
+***Most of the state is per instance, so two copies act as two separate SBAs that share a hostname.*** Fix the
+session first, then decide whether you need shared events. Often the honest answer is "one instance, restarted
+fast".
+
+- ***What happens to each piece of state***:
+
+| State                         | Where it lives here                                          | With 2 instances behind round-robin                                       | Fix                                                                     |
+|-------------------------------|--------------------------------------------------------------|---------------------------------------------------------------------------|-------------------------------------------------------------------------|
+| UI login session              | WebFlux in-memory `WebSession`                               | every other request lands on the instance that doesn't know you → back to `/login` | sticky sessions, or Spring Session on Redis (it has a reactive store) |
+| CSRF token                    | `XSRF-TOKEN` cookie (`CookieServerCsrfTokenRepository`)      | ***fine***: nothing is stored on the server                               | —                                                                       |
+| Status history / event store  | SBA in-memory event store                                    | each instance polls on its own and builds its own timeline; views differ for a few seconds | SBA's Hazelcast support shares the event store across nodes          |
+| Notifications                 | none today                                                   | once added, ***each instance sends every alert*** → duplicates            | Hazelcast mode also keeps a "sent notifications" map to de-duplicate (check property names for your SBA version) |
+| Audit log, HTTP exchanges     | `InMemory*Repository` ([Q6](#qa-actuator-repositories))      | split across nodes; who logged in where depends on the LB                 | ship audit events to a central store                                     |
+| Quartz `HeartbeatJob`         | in-memory job store                                          | runs on both                                                              | harmless here; for real jobs, a clustered JDBC job store                 |
+
+- ***Load on the services doubles*** — polling isn't split between nodes out of the box, so plan for 2 × N health
+  GETs every 10 s. That is negligible at 10 instances. At thousands of instances, raise `status-interval` instead.
+- ***Eureka side is fine*** — both register as `ADMIN-SERVER` and both read the same registry.
+- ***Is it worth it?*** SBA is ***not in the request path*** ([§1](#overview)). When it's down, nothing fails for
+  users; you lose the console and any SBA alerts.
+  - ***Single instance + liveness-based auto-restart*** (Kubernetes restarts it in seconds) + paging from a separate
+    system ([Q10](#qa-sba-as-alerting)) covers most teams. A restart costs a re-login and a fresh timeline.
+  - ***Cluster with Hazelcast + Spring Session*** only when SBA notifications are a contractual alert path or many
+    teams depend on the console. You take on a stateful Hazelcast cluster, its network config and its upgrades.
+- ***Monitor*** — whatever pages you must also probe admin-server's own `/actuator/health`. SBA's view of itself
+  doesn't count.
+
+<a id="qa-mass-offline-debug"></a>
+
+**Q12. 🔥🔥 SBA suddenly shows `order-service`, `user-service` and `product-service` OFFLINE, while the Eureka dashboard
+shows them UP and the gateway serves traffic. Debug it.**
+
+***Different observers disagree, so the cause is on SBA's path or in what SBA measures, not in the services
+themselves.*** Eureka UP only proves outbound heartbeats (client → registry). SBA needs the opposite direction plus
+a health response inside its timeout.
+
+- ***First clue: which ones?*** The three OFFLINE modules are exactly the ones with Postgres. `gateway-service`,
+  `eureka-server` and admin-server itself have no database and stay UP. That points at the ***health endpoint***,
+  not the network.
+- ***Hypotheses, most likely first***:
+
+| # | Hypothesis | Why it fits | Check |
+|---|------------|-------------|-------|
+| 1 | `/actuator/health` is slow because the `db` indicator waits on Postgres or on an exhausted Hikari pool | health aggregates `db` (and `show-details: always`). OFFLINE = no answer within SBA's timeout (`spring.boot.admin.monitor.default-timeout`). Cached `GET /api/orders/{id}` keeps working, so the gateway looks fine | `curl -w '%{time_total}' -u admin:admin <instance>/actuator/health` from the admin-server host; Hikari `hikaricp.connections.pending` |
+| 2 | Registered address unreachable from SBA | `prefer-ip-address: true` registers an IP. After a Docker network change or VPN reconnect, the IP may still route for the client's own heartbeats but not from SBA | `curl` the exact `healthCheckUrl` from `GET /eureka/apps/ORDER-SERVICE` on the SBA host |
+| 3 | admin-server itself is stalled | a long GC pause or a blocked Netty event loop delays every poll | admin-server `jvm.gc.pause`, threaddump: `reactor-http-nio-*` threads in BLOCKED/WAITING |
+| 4 | Credentials rotated | ***ruled out for status***: health is public here, so wrong credentials break other views with 401 but don't cause OFFLINE | — |
+
+- ***Why the gateway doesn't notice #1*** — the gateway checks nothing. It routes on Eureka status, and Eureka
+  doesn't use actuator health unless `eureka.client.healthcheck.enabled: true` (not set here). That's why the
+  observers disagree.
+- ***Fix depends on the cause***:
+  - ***Slow DB health*** — bound it: a Hikari `connection-timeout` well below SBA's timeout, so the indicator fails
+    fast to DOWN instead of hanging into OFFLINE. Fix the Postgres or pool problem itself. Think about pointing SBA at
+    a cheaper group via Eureka metadata `health.path`; the trade-off is that SBA then stops seeing DB trouble.
+  - ***Address*** — register a stable, routable address (`eureka.instance.ip-address` / hostname per network) and
+    give SBA a network path to the backend subnet.
+  - ***SBA stall*** — give it heap, find the blocking call in the threaddump, and don't run anything blocking on
+    its event loop.
+- ***Prevent the confusion*** — alert on the metric (DB pool wait, health latency), not only on SBA status. Show
+  "Eureka UP but SBA OFFLINE" as its own signal: it means "the observer can't see", not "the service is down".

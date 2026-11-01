@@ -18,6 +18,11 @@
     - 7.7 [What does self-preservation protect against, and is turning it off ever wrong?](#faq-self-preservation)
     - 7.8 [Two `user-service` instances register with the same `instanceId` (e.g. identical `hostname:port` — common in containers with the same internal hostname) — what happens?](#faq-duplicate-instance-id)
     - 7.9 [What's the worst-case time between an instance actually going down and the gateway noticing and routing around it?](#faq-worst-case-detection)
+    - 7.10 🔥 [One shared `admin` user, the caller's `Authorization` header forwarded as-is, the password in Eureka metadata — what is the blast radius of one leaked credential, and how would you redesign it?](#faq-shared-credentials-blast-radius)
+    - 7.11 🔥 [`user-service` degrades to a 25 s p99 under load — what happens to `order-service` and the gateway, and why doesn't the `user: null` fallback save you?](#faq-slow-downstream-cascade)
+    - 7.12 🔥 [Delete `order-service`'s `@Primary` plain `RestClient.Builder` and keep only the `@LoadBalanced` one — why does Eureka registration break, and what else silently changes?](#faq-primary-restclient-builder)
+    - 7.13 🔥🔥 [Design a zero-error rolling redeploy of `user-service` (3 instances) while traffic flows through the gateway and through `order-service`'s direct `UserClient` — what fails today, and what sequence fixes it?](#faq-zero-error-rolling-deploy)
+    - 7.14 🔥🔥 [Move this stack onto Kubernetes without a big-bang cutover — keep Eureka and the gateway or replace them, and how do you migrate service by service with rollback?](#faq-migrate-to-kubernetes)
 8. 🗺️ [Where this fits: Spring Cloud/Netflix OSS vs Kubernetes](#where-this-fits)
 9. 🌐 [Virtual IPs (VIP)](#virtual-ips-vip)
 10. 🔐 [Security and Spring Boot Admin features](#security-and-sba-features)
@@ -513,6 +518,201 @@ purely from cache-staleness layered three deep — no bug involved, just three
 independent caches each doing their job on their own clock. Tightening any
 one of those intervals trades staleness for load on `eureka-server` and the
 gateway.
+
+<a id="faq-shared-credentials-blast-radius"></a>
+
+**7.10 🔥 Every module shares one `admin` user, the gateway forwards the caller's `Authorization` header as-is, and
+the password sits in each instance's Eureka metadata — what is the blast radius of one leaked credential, and how
+would you redesign it?**
+
+***One leaked password is root on the whole system***: it opens the registry, every service's API and every actuator
+— including `shutdown`, `restart`, `env` POST + `refresh` and `heapdump` — on every instance.
+
+- ***Why it leaks easily*** — `eureka.instance.metadata-map.user.password` is replicated to every registry node and
+  returned by `GET /eureka/apps` to every client (that is exactly how `admin-server` reads it). Anyone who can fetch
+  the registry reads every service's password; a heap dump of any client holds it too.
+- ***Why it is total*** — the same `spring.security.user` guards `/api/**`, `/actuator/**` and `/eureka/**` in every
+  module, and every module exposes `shutdown` (`access: unrestricted`) and `env` POST (`env.post.enabled: true`).
+  `POST /actuator/env` + `POST /actuator/refresh` rewrite config at runtime — e.g. repoint
+  `eureka.client.service-url` at a rogue registry.
+- ***Confused deputy*** — `UserClient` calls `user-service` with `order-service`'s configured credentials, not the
+  caller's, so `user-service` can't tell "end user X" from "anyone who reached `order-service`". Through the gateway
+  the end user's Basic header travels unchanged to every hop, in clear text (no TLS anywhere in this demo).
+- ***Redesign***:
+
+| Concern            | Now                                     | Target                                                                                                                     |
+|--------------------|-----------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| End-user auth      | Basic, forwarded to every service       | OAuth2/OIDC login at the gateway; services are resource servers validating a JWT (signature, `aud`, expiry); `TokenRelay` |
+| Service-to-service | shared `admin` credentials              | per-service client-credentials token (or mTLS identity) with narrow scopes, e.g. `users:read`                             |
+| Actuator           | same user; `shutdown`, `env` POST open  | separate management port/network, per-service credentials, `shutdown`/`env` POST off outside dev                          |
+| SBA → actuator     | plaintext password in registry metadata | SBA holds its own credential (`spring.boot.admin.instance-auth.*` or a secret store) — nothing secret in metadata         |
+| Transport          | HTTP                                    | TLS at the edge at minimum; mTLS inside without a mesh                                                                     |
+
+- ***Interview point*** — registry metadata is ***discovery data, not a secret store***: assume every client can read
+  all of it. Related: [§10](#security-and-sba-features).
+
+<a id="faq-slow-downstream-cascade"></a>
+
+**7.11 🔥 `user-service` degrades to a 25 s p99 under load. What happens to `order-service` and the gateway, and why
+doesn't the `user: null` fallback save you?**
+
+***The fallback only runs after the timeout, so slow is worse than down***: every in-flight `/with-user` call pins a
+Tomcat worker thread for up to the 30 s read timeout (`LoadBalancerConfig.boundedTimeouts()`), and the pool runs dry
+long before any fallback fires.
+
+- ***Little's law*** — concurrency = throughput × latency. Tomcat's default is 200 worker threads and virtual threads
+  aren't enabled here, so at 25 s per call ***200 / 25 = 8 req/s*** saturates the whole service. `/api/orders` and
+  `/actuator/health` queue behind it — same pool.
+- ***Down vs slow*** — `user-service` down: connection refused in milliseconds → `RestClientException` →
+  `user: null`, cheap. Slow: each call waits the full read timeout before the same fallback.
+- ***Gateway*** — reactive (Netty), so no thread exhaustion, but ***no response timeout is configured***
+  (`spring.cloud.gateway.server.webflux.httpclient.response-timeout` unset): it holds connections as long as
+  `order-service` does. Clients give up first and retry → a retry storm on an already saturated service.
+- ***Health lies*** — `UserServiceHealthIndicator` counts registry entries, not latency: UP with 2 instances while
+  both crawl. Meanwhile liveness probes queue behind busy threads and can fail → the orchestrator restarts
+  blocked-but-healthy instances → less capacity.
+- ***Fix, in order***:
+  1. ***Timeout budget*** derived from the SLO, shrinking per hop: gateway response timeout (say 5 s) > order → user
+     read timeout (say 1–2 s). A 30 s read timeout behind a client that quits at 10 s is pure wasted work.
+  2. ***Circuit breaker*** (Resilience4j through Spring Cloud CircuitBreaker) around `fetchUser`: past a
+     failure/slow-call rate threshold, return `user: null` immediately without calling.
+  3. ***Bulkhead*** — cap concurrent calls to `user-service` so one dependency can't take every thread. Virtual
+     threads remove the thread cap but not the downstream pile-up, so keep the bulkhead.
+  4. ***Retries with a budget*** — at most one, on another instance, for idempotent GETs, with jitter; never at
+     every layer at once.
+- ***Monitor*** — `http.client.requests` p99 for `USER-SERVICE`, busy Tomcat threads, breaker state, gateway 5xx/504
+  rate, and a counter on the fallback path (today `user: null` is silent).
+
+<a id="faq-primary-restclient-builder"></a>
+
+**7.12 🔥 `order-service` defines two `RestClient.Builder` beans — a `@Primary` plain one and a `@LoadBalanced` one.
+Delete the plain one: why does Eureka registration break, and what else silently changes?**
+
+***Eureka's own HTTP client becomes load-balanced***: Spring Cloud Netflix builds its `RestClient` transport from an
+unqualified `RestClient.Builder` lookup, so with only the `@LoadBalanced` builder left, the call to
+`http://localhost:8761/eureka/` treats `localhost` as a service ID.
+
+- ***Chicken-and-egg*** — resolving `localhost` needs the registry (no instances under that ID), but fetching the
+  registry goes through that same client. Register, renew and fetch all fail; the instance never shows up and
+  `UserClient` has nothing to resolve `USER-SERVICE` against either.
+- ***`@LoadBalanced` is a qualifier*** — Spring Cloud Commons' `LoadBalancerRestClientBuilderBeanPostProcessor` adds
+  the service-ID-rewriting interceptor only to builders carrying it. `@Primary` on the plain builder means every
+  unqualified injection point (Eureka, any other library) gets the non-LB one; `UserClient` opts in explicitly with
+  `@LoadBalanced` on its constructor parameter.
+- ***Tracing changes too*** — only the `@LoadBalanced` builder gets `.observationRegistry(...)`. `RestClient.builder()`
+  is not Boot's auto-configured builder and records no observations by default, so moving `UserClient` to an
+  unobserved builder means no client span and no `traceparent` header: Zipkin shows gateway → order and
+  `user-service` as two unrelated traces. The flip side: the unobserved plain builder keeps Eureka's 10 s heartbeats
+  out of the traces.
+- ***Timeouts*** — both builders use `boundedTimeouts()` (5 s connect, 30 s read). The JDK client's default read
+  timeout is infinite, so a builder created elsewhere without it can hang a thread forever on a stuck peer.
+- ***Catch it in review*** — any module declaring a `@LoadBalanced` builder must keep a plain one for infrastructure
+  clients; an integration test asserting the instance appears in `GET /eureka/apps` catches the regression.
+
+<a id="faq-zero-error-rolling-deploy"></a>
+
+**7.13 🔥🔥 Design a zero-error rolling redeploy of `user-service` (3 instances) while traffic flows through the
+gateway and through `order-service`'s direct `UserClient`. What fails today, and what sequence fixes it?**
+
+***Today every stopped instance keeps being picked for up to ~1.5 minutes plus the drain***, because shutdown runs
+drain → stop web server → *then* deregister, and three caches sit between the registry and each caller. The fix is
+***deregister first, wait out the caches, then drain***, with one retry on another instance as a safety net.
+
+- ***What happens on SIGTERM today*** (lifecycle phases checked against Boot 4.1 / Spring Cloud Netflix 5.0, as of
+  2026):
+  1. `server.shutdown: graceful` — Boot's graceful-shutdown lifecycle (phase `Integer.MAX_VALUE - 1024`, stops first)
+     stops accepting new requests and drains in-flight ones for up to
+     `spring.lifecycle.timeout-per-shutdown-phase` (30 s).
+  2. The web server stops.
+  3. Only then `EurekaAutoServiceRegistration` (phase 0) stops and the client sends its cancel
+     (`eureka.client.should-unregister-on-shutdown`, default true).
+  4. Callers see it only after eureka-server's read-only response cache (`response-cache-update-interval-ms`, 30 s)
+     → their registry fetch (30 s) → Spring Cloud LoadBalancer's instance cache (`spring.cloud.loadbalancer.cache.ttl`,
+     35 s).
+  - ***Result*** — round-robin over 3 instances sends ~1/3 of calls to a refusing instance for that window. The
+    gateway returns the error as-is (no `Retry` filter); `UserClient` swallows it into `user: null` — a silent
+    data-quality incident, not an alert.
+- ***Target sequence***, one instance at a time, surge first (start the new instance before stopping an old one, so
+  capacity never drops below 3):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as Deployer
+    participant U as user-service (old)
+    participant E as eureka-server
+    participant C as gateway / order-service
+    D ->> D: start new instance, wait for readiness + UP in registry + one fetch cycle
+    D ->> U: POST /actuator/serviceregistry {"status":"OUT_OF_SERVICE"}
+    U ->> E: on-demand status update
+    Note over E, C: wait > 30 s response cache + 30 s fetch + 35 s LB cache
+    C -->> C: only UP instances offered — old one no longer picked
+    D ->> U: SIGTERM → graceful drain of stragglers → deregister
+```
+
+- ***What has to change***:
+  - Expose the `serviceregistry` actuator endpoint (Spring Cloud Commons) — it is in no exposure list here today —
+    behind the actuator credentials.
+  - Gate registration on real readiness: `eureka.client.healthcheck.enabled: true` propagates actuator health into
+    the Eureka status, so a DOWN health never shows up as UP in the registry.
+  - Safety net for the remaining race: gateway `Retry` filter on `GET` for connect errors/`BAD_GATEWAY`; for
+    `UserClient`, Spring Cloud LoadBalancer retry (`spring.cloud.loadbalancer.retry.max-retries-on-next-service-instance`)
+    — check which retry library your version needs on the classpath. Retry idempotent calls only.
+  - Optionally shrink the windows (`registry-fetch-interval-seconds` 5–10 s on callers, a shorter LB `cache.ttl`,
+    lower or disabled read-only response cache on the server) — paid for with N clients × fetch rate on the registry.
+
+| Approach                               | Client-visible errors              | Deploy time per instance | Cost                        |
+|----------------------------------------|------------------------------------|--------------------------|-----------------------------|
+| Plain SIGTERM (today)                  | ~1/3 of calls for ~1.5 min + drain | fastest                  | none                        |
+| Retries only                           | mostly masked; extra latency       | fastest                  | retry load; unsafe for POST |
+| OUT_OF_SERVICE → wait → drain (+retry) | ~0                                 | +~100 s                  | deploy tooling              |
+| Shrunken caches                        | shorter windows                    | shorter wait             | more registry traffic       |
+
+- ***On Kubernetes*** the same idea is a `preStop` hook that marks OUT_OF_SERVICE and sleeps past the cache window
+  before SIGTERM arrives.
+- ***Monitor*** — gateway 5xx per route during deploys, a counter on the `user: null` path, Eureka renews per minute
+  (a drop mid-deploy means instances left without cancelling). Window arithmetic: [7.9](#faq-worst-case-detection).
+
+<a id="faq-migrate-to-kubernetes"></a>
+
+**7.14 🔥🔥 You must move this stack onto Kubernetes without a big-bang cutover. Keep Eureka and the gateway, or
+replace them — and how do you migrate service by service with rollback?**
+
+***Replace Eureka with Kubernetes Services in the end, but bridge through Spring Cloud's `DiscoveryClient`
+abstraction***: the code depends on service IDs (`lb://USER-SERVICE`, `http://USER-SERVICE`), not on Eureka, so
+swapping the discovery backend is a dependency/config change per module, not a code rewrite.
+
+- ***Why not just run Eureka inside the cluster forever*** — two sources of truth (pod readiness vs Eureka
+  heartbeats + self-preservation) that disagree during exactly the incidents you care about, and one more stateful
+  system to operate for something the platform already does.
+
+| Option                               | How                                                                | Pros                                                         | Cons                                                                                             |
+|--------------------------------------|--------------------------------------------------------------------|--------------------------------------------------------------|--------------------------------------------------------------------------------------------------|
+| A. Eureka in Kubernetes              | StatefulSet of 3, peers via headless-Service DNS                   | zero code change; VMs and pods share one registry            | two health models; pod IPs must be routable from VMs; you still run Eureka                       |
+| B. Spring Cloud Kubernetes discovery | swap the Eureka client starter for the Kubernetes discovery client | `lb://` and `@LoadBalanced` keep working; SBA can use it too | needs RBAC to read Services/Endpoints; IDs become lowercase Service names                        |
+| C. Plain Service DNS                 | `http://user-service:8081` through kube-proxy; drop client-side LB | no discovery library; readiness gates traffic                | L4 per-connection balancing (keep-alive connections stick to one pod); no retry on next instance |
+
+- ***Migration plan (strangler, leaf services first)***:
+  1. ***Normalize IDs*** — switch `lb://USER-SERVICE` to `lb://user-service` while still on Eureka (Eureka's VIP
+     lookup is case-insensitive; Kubernetes Service names must be lowercase).
+  2. ***Bridge phase*** — Eureka (option A, or kept on VMs) stays the shared registry while services move one at a
+     time; Spring Cloud Commons' `CompositeDiscoveryClient` queries several discovery clients in order and returns
+     the first non-empty answer, letting callers prefer Kubernetes and fall back to Eureka for not-yet-moved services.
+  3. ***Probes*** — map Boot's `/actuator/health/liveness` and `/readiness` (already on: `probes.enabled: true`) to
+     Kubernetes probes; readiness + Endpoints removal replace the OUT_OF_SERVICE dance from
+     [7.13](#faq-zero-error-rolling-deploy) (still add a short `preStop` sleep for endpoint propagation).
+  4. ***Edge*** — keep Spring Cloud Gateway as an in-cluster Deployment behind an Ingress/Gateway API listener while
+     it still adds value (auth, Swagger aggregation, per-route filters such as `SetPath`); replace it with
+     Gateway API `HTTPRoute`s only when routes are plain path → Service with simple rewrites.
+  5. ***Operations*** — `admin-server` switches to Kubernetes discovery; `admin/admin` moves to Secrets; in-memory
+     Quartz jobs run once per replica (fine for the heartbeat demo, wrong for real jobs → clustered JDBC job store
+     or a Kubernetes CronJob).
+  6. ***Decommission*** — stop Eureka only after the last VM caller is gone (watch registrations and fetch traffic
+     on `eureka-server` drop to zero).
+- ***Rollback*** — every step is a config flip (discovery client order, weighted DNS at the edge, a Deployment scaled
+  back to VMs); keep the Eureka cluster running and the VM deploy pipeline intact until the end.
+- ***Trade-off to state out loud*** — option C is the simplest end state, but losing client-side LB means losing
+  "retry on the next instance"; add that back via a mesh or keep B. Background: [§8](#where-this-fits).
 
 <a id="where-this-fits"></a>
 

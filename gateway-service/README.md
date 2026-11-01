@@ -10,6 +10,11 @@
 6. 🧪 [Tests](#tests)
 7. ⚠️ [Gotchas](#gotchas)
 8. ❓ [Q&A](#qa)
+    - 8.1 🔥 [The `gateway` actuator endpoint is `access: unrestricted` and `env` POST + `refresh` are on — what can someone holding the credentials do to the route table, and why is that worse than on a backend?](#qa-actuator-route-injection)
+    - 8.2 🔥 [Why are the service specs routed at `/api-docs/{service}` instead of `/v3/api-docs/{service}` — and what decides who wins when a gateway route and a local handler match the same path?](#qa-route-vs-handler-precedence)
+    - 8.3 🔥 [A teammate adds a `GlobalFilter` that checks an API key with a blocking JDBC lookup — what happens under load, and how do you catch and fix it?](#qa-blocking-in-filter)
+    - 8.4 🔥🔥 [Traffic grows 10× across 3 gateway instances — design per-client rate limiting, timeouts and circuit breaking at this edge, given that every client here logs in as the same `admin` user](#qa-edge-rate-limit-breaker)
+    - 8.5 🔥🔥 [Canary `user-service` v2 at 5 % of traffic through this gateway — how, given Eureka discovery and `order-service` calling `user-service` directly?](#qa-canary-release)
 
 API gateway module of [learning-spring-cloud](../README.md). The project-wide
 picture (all 6 modules, Eureka registry flow, Spring Boot Admin) lives in the root
@@ -360,4 +365,175 @@ management:
 
 ## <span style="color:hsl(116,80%,58%)">8. ❓ Q&A</span>
 
-Questions go here.
+<a id="qa-actuator-route-injection"></a>
+
+**Q1. 🔥 The `gateway` actuator endpoint is `access: unrestricted` and `env` POST + `refresh` are on. What can someone
+holding the credentials do to the route table, and why is that worse than on a backend?**
+
+- ***They can rewrite where traffic goes.*** `POST /actuator/gateway/routes/{id}` with a route definition, then
+  `POST /actuator/gateway/refresh`, adds a live route to ***any*** URI — no restart, no config change in Git.
+  `POST /actuator/env` + `POST /actuator/refresh` does the same via properties.
+- ***Why the gateway is the worst place for this***:
+  - ***Credential exfiltration*** — routes forward the caller's `Authorization` header unchanged ([§3](#security)).
+    A route `Path=/api/users/**` → `https://attacker.example` (ordered before the real one) harvests every user's
+    Basic credentials while still proxying the response, so nobody notices.
+  - ***SSRF*** — a route to `http://169.254.169.254/` or an internal admin port turns the gateway into a proxy into
+    the private network, with the gateway's own network position.
+  - ***History*** — CVE-2022-22947 was remote code execution through exactly this endpoint (SpEL in route
+    definitions added via the actuator), fixed in Spring Cloud Gateway 3.1.1 / 3.0.7. Patched versions still let an
+    authorised caller redirect traffic — that's a feature, not a bug.
+- ***Hardening*** (beyond the shared-credential problem in the root [FAQ 7.10](../README.md#faq-shared-credentials-blast-radius)):
+
+| Control                    | How                                                                                                    |
+|----------------------------|--------------------------------------------------------------------------------------------------------|
+| Restrict writes            | `POST`/`DELETE` on `/actuator/gateway/**` need a separate admin role (method-based security matcher), or don't expose `gateway` in prod |
+| Remove runtime config edit | `env.post.enabled: false`; no `refresh`/`restart` exposure outside dev                                 |
+| Separate management plane  | `management.server.port` bound to an internal interface; not reachable through the public listener     |
+| Routes as code             | routes only from versioned config; diff `GET /actuator/gateway/routes` against Git in a periodic check |
+| Egress allowlist           | network policy so the gateway can only reach backend subnets — limits SSRF even if a route is injected |
+
+- ***Detect*** — audit events for every actuator POST (the `auditing` manager already records who authenticated),
+  alerts on route count changes, and egress to unexpected hosts.
+
+<a id="qa-route-vs-handler-precedence"></a>
+
+**Q2. 🔥 Why are the service specs routed at `/api-docs/{service}` instead of `/v3/api-docs/{service}` — and what
+decides who wins when a gateway route and a local handler match the same path?**
+
+- ***Local handlers win.*** The gateway's `RoutePredicateHandlerMapping` runs at order `1`
+  (`spring.cloud.gateway.server.webflux.handler-mapping.order`, default 1, as of 2026), after WebFlux's annotated
+  controller mapping (order 0). springdoc serves `/v3/api-docs/{group}` from a controller, so a gateway route on that
+  path is never reached — springdoc would answer with an (empty or unknown) group named `user-service`. Moving the
+  routes to `/api-docs/**` sidesteps the collision; `SetPath=/v3/api-docs` rewrites them for the backends.
+- ***Among routes***, the first matching route wins, ordered by each route's `order` (default 0) and then
+  declaration order. Overlaps bite when someone later adds `/api/users/admin/**` below `/api/users/**`: it never
+  matches unless given a lower `order`.
+- ***Security sees the path before routing*** — `SecurityWebFilterChain` runs as a `WebFilter` ahead of any handler
+  mapping, so `public-paths` must list the ***external*** path (`/api-docs/**`), not the rewritten one. Every new
+  public route is a security decision: `/api-docs/**` here exposes the downstream specs without credentials (they are
+  public on the services too).
+- ***How to check*** — `GET /actuator/mappings` lists local handlers with their order; `GET /actuator/gateway/routes`
+  lists routes in match order. A collision shows up as a path present in both.
+- ***Review rule*** — never route a path prefix that a local starter owns (`/actuator/**`, `/v3/api-docs/**`,
+  `/swagger-ui/**`, `/webjars/**`); add an integration test per route that asserts the response came from the
+  backend (e.g. a backend-only header or body field).
+
+<a id="qa-blocking-in-filter"></a>
+
+**Q3. 🔥 A teammate adds a `GlobalFilter` that checks an API key with a blocking JDBC lookup. What happens under load,
+and how do you catch and fix it?**
+
+- ***The whole gateway stalls, not just that route.*** Reactor Netty runs every request on a small set of event-loop
+  threads (about one per CPU core). A 20 ms blocking query on an event loop means that loop serves nothing else for
+  20 ms — at 8 cores the gateway tops out near 8 / 0.02 = ***400 req/s for every route***, health checks included.
+- ***Symptoms*** — latency climbs on all routes at once while CPU stays low; thread dumps show
+  `reactor-http-nio-*` threads in socket reads or JDBC calls; liveness probes time out and the instance gets
+  restarted.
+- ***Same trap elsewhere in this module*** — the `auditing` authentication manager is non-blocking only because
+  `ReactiveUserDetailsService` is in-memory here. Swap it for a JDBC-backed user store and every Basic login blocks an
+  event loop.
+- ***Catch it***:
+  - BlockHound in tests — fails a test when a blocking call happens on a non-blocking thread.
+  - Code review rule: no `JdbcTemplate`, `RestTemplate`, `RestClient`, `.block()` or `Thread.sleep` in gateway
+    filters.
+  - Metrics: Reactor Netty event-loop pending tasks, and p99 across all routes moving together.
+- ***Fix, best first***:
+  1. A reactive client (R2DBC, `WebClient`, reactive Redis) for the lookup.
+  2. Cache the key → principal mapping (Caffeine `AsyncCache`) so the lookup is rare.
+  3. Last resort: wrap the call in `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())` — moves the
+     block off the event loop, but bounded elastic has a cap (10 × cores by default) and queues behind it.
+- ***Trade-off*** — `boundedElastic` is a pressure valve, not a design: under real load it just moves the queue.
+
+<a id="qa-edge-rate-limit-breaker"></a>
+
+**Q4. 🔥🔥 Traffic grows 10× and you run 3 gateway instances. Design per-client rate limiting, timeouts and circuit
+breaking at this edge — given that every client here logs in as the same `admin` user.**
+
+***Distributed token-bucket limiting keyed by a real client identity, a per-route timeout budget, and a circuit
+breaker with a fast fallback — and first fix identity, because a key resolver on the principal puts every client in
+one bucket here.***
+
+- ***Rate limiting***
+  - Spring Cloud Gateway's `RequestRateLimiter` filter with `RedisRateLimiter` (token bucket in Redis, needs the
+    reactive Redis starter): `replenishRate`, `burstCapacity`, `requestedTokens`; responds `429` with
+    `X-RateLimit-*` headers.
+  - ***Key choice*** — the default `PrincipalNameKeyResolver` keys on the authenticated name: with one shared
+    `admin` user, one noisy client exhausts the budget for everyone. Use a per-client identity (API key, OAuth2
+    `client_id`, JWT `sub`) — not `X-Forwarded-For`, which clients can spoof.
+  - ***Local vs distributed*** — a per-instance in-memory limiter allows 3× the intended rate across 3 instances and
+    shifts as the LB rebalances; Redis gives one global bucket at the cost of a network hop per request and a new
+    dependency. Decide what happens when Redis is down (fail open for availability, fail closed for abuse-sensitive
+    routes).
+- ***Timeouts*** — set `spring.cloud.gateway.server.webflux.httpclient.connect-timeout` / `response-timeout`
+  globally (unset today), override per route with route metadata (`response-timeout`, `connect-timeout`) — e.g.
+  orders with a downstream call to `user-service` get more than plain lookups. Edge timeout > downstream timeout (see
+  root [FAQ 7.11](../README.md#faq-slow-downstream-cascade)).
+- ***Circuit breaker*** — `CircuitBreaker` filter (Spring Cloud CircuitBreaker + Resilience4j) per route with a
+  `fallbackUri: forward:/fallback/users` returning a fast `503` + `Retry-After`, so a dying backend costs microseconds
+  instead of a timeout each.
+- ***Retry*** — `Retry` filter only for `GET`, only on connect errors/`502`/`503`, at most 1 retry with backoff,
+  ***inside*** the breaker so failed retries count towards opening it.
+
+```yaml
+- id: user-service
+  uri: lb://USER-SERVICE
+  predicates:
+    - Path=/api/users/**
+  metadata:
+    response-timeout: 2000
+  filters:
+    - name: RequestRateLimiter
+      args:
+        redis-rate-limiter.replenishRate: 50
+        redis-rate-limiter.burstCapacity: 100
+        key-resolver: "#{@clientIdKeyResolver}"
+    - name: CircuitBreaker
+      args:
+        fallbackUri: forward:/fallback/users
+    - name: Retry
+      args:
+        retries: 1            # methods defaults to GET
+        statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+```
+
+- ***Capacity check*** — Netty handles 10× connections cheaply; the real limits are downstream (Tomcat threads in
+  the backends) and Redis round-trips. Load-test with [../load-tests](../load-tests/README.md) and watch where p99
+  breaks first.
+- ***Monitor*** — `429` rate per client, breaker state transitions, gateway `5xx`/`504` per route, Redis latency.
+- ***Trade-off to state*** — the limiter protects backends from clients; the breaker protects the gateway and
+  clients from backends. You need both, and neither replaces capacity planning.
+
+<a id="qa-canary-release"></a>
+
+**Q5. 🔥🔥 Canary `user-service` v2 at 5 % of traffic through this gateway. How, given Eureka discovery and
+`order-service` calling `user-service` directly?**
+
+***Do the split where all callers meet — the load-balancer layer, using instance metadata — not only in gateway
+routes; a gateway-only canary leaks, because `order-service` reaches `user-service` without the gateway.***
+
+- ***Option A: gateway `Weight` predicate*** — register v2 under a separate service ID (`USER-SERVICE-V2`), two
+  routes in one weight group (`Weight=users, 95` / `Weight=users, 5`). Simple and visible in
+  `/actuator/gateway/routes`, but `order-service`'s `UserClient` (`http://USER-SERVICE`) never sees v2, so the
+  canary only covers external traffic.
+- ***Option B: metadata-aware load balancing*** — keep one service ID; v2 instances register with
+  `eureka.instance.metadata-map.version: v2`. A custom `ServiceInstanceListSupplier` (or `ReactorLoadBalancer`) in
+  ***both*** the gateway and `order-service` picks v2 for a hash-selected 5 % of users. All callers see the same split.
+- ***Option C: header-based routing for testers first*** — route `X-Canary: true` to v2 (gateway predicate +
+  propagate the header to `UserClient`), then switch to percentage.
+
+| Concern              | A. Weight predicate         | B. Metadata-aware LB                       |
+|----------------------|-----------------------------|--------------------------------------------|
+| Covers service calls | no — gateway traffic only   | yes — every `@LoadBalanced` caller         |
+| Stickiness           | random per request          | hash on user ID → same user, same version  |
+| Change the split     | edit routes + `refresh`     | config property read by the supplier       |
+| Effort               | config only                 | code in each calling module                |
+
+- ***Stickiness matters*** — random per-request splits make one user flip between v1 and v2 within a page; hash on a
+  stable key (user ID, `client_id`) so a user's experience and error reports are consistent.
+- ***Compatibility*** — v1 and v2 serve simultaneously: response shape changes must be additive (old
+  `UserSummary` readers in `order-service` must tolerate new fields); DB migrations expand-then-contract.
+- ***Rollback*** — split to 0 % (or deregister v2 instances: `OUT_OF_SERVICE`, see root
+  [FAQ 7.13](../README.md#faq-zero-error-rolling-deploy)); cache layers mean rollback takes up to a couple of
+  minutes to fully apply.
+- ***Decide with data*** — tag spans and metrics with the instance version (a `version` resource attribute or tag),
+  compare v1 vs v2 error rate and p99 in Zipkin and metrics; automate promote/rollback on thresholds.

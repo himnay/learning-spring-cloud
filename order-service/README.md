@@ -13,6 +13,11 @@
 9. 🛠️ [Gotchas and troubleshooting](#gotchas)
 10. ❓ [Q&A](#qa)
     - 10.1 [What are the different ways Spring Boot Admin can call `order-service`, and what does `order-service` need for each?](#qa-sba-call-options)
+    - 10.2 🔥 [The `orders` table grows from 6 rows to 5 million — what does `OrderCacheRefresher` do to the heap, Postgres and the hit rate with `maximumSize=1000`?](#qa-refresher-at-scale)
+    - 10.3 🔥 [Postgres is down for two minutes — what do readiness, Eureka, the gateway and callers see, and should `db` be in the readiness group?](#qa-postgres-outage-readiness)
+    - 10.4 🔥 [What does Spring Session JDBC cost at 3 instances and 10× browser users, and what risk hides in `csrf.ignoringRequestMatchers("/api/**")` once sessions exist?](#qa-jdbc-session-cost)
+    - 10.5 🔥🔥 [Add `POST /api/orders` that checks the user exists — design it for client retries, 3 instances with local caches and a flaky `user-service`](#qa-create-order-design)
+    - 10.6 🔥🔥 [Turn `HeartbeatJob` into a nightly billing job that must run exactly once across 3 instances, survive a node crash mid-run and never double-bill](#qa-exactly-once-job)
 
 The `order-service` module of the Eureka discovery demo. It is the "kitchen sink"
 service: on top of the plain Eureka-client role shared with `user-service` and
@@ -660,3 +665,225 @@ Kubernetes `Service`; name a separate actuator port `management` in the Service'
   hence `csrf.ignoringRequestMatchers("/actuator/**")` in this module's `SecurityConfig`.
 - ***Public paths*** — `/actuator/health/**` and `/actuator/info` are `permitAll()` here, so status still shows even
   with wrong credentials; the other views then fail with `401`.
+
+<a id="qa-refresher-at-scale"></a>
+
+**Q2. 🔥 The `orders` table grows from 6 rows to 5 million. What does `OrderCacheRefresher` do to the heap, Postgres and
+the hit rate with `maximumSize=1000`?**
+
+- ***Every 5 minutes it loads the whole table into memory to fill a cache that holds 0.02 % of it.*** The refresh
+  ([§4](#caching)) is `orderRepository.findAll()` (a fully materialised `List`), followed by one `put` per row.
+- ***Heap*** — two full copies at once:
+  - ***pgjdbc buffers the whole result set*** by default. It only streams with a cursor when autocommit is off and
+    a fetch size is set, and neither is true here.
+  - ***Then the `List<Order>`*** — each record holds two boxed `Long`s and a `String`, so roughly 100–150 bytes per
+    row. That's several hundred MB per copy, then a burst of garbage when the run ends. Expect long GC pauses or
+    `OutOfMemoryError` on a default-sized heap.
+- ***Postgres*** — a full sequential scan of 5M rows every 5 minutes, from ***each instance***. Three instances means
+  three scans per cycle, sending gigabytes over the wire.
+- ***Scheduler*** — Boot's default task scheduler has ***one thread*** (`spring.task.scheduling.pool.size: 1`). A run
+  longer than 5 minutes delays the next one, because `fixedRate` doesn't overlap on a single thread. It also
+  blocks every other `@Scheduled` method in the app.
+- ***Hit rate*** — 5M puts into 1,000 slots. Caffeine's W-TinyLFU admission is scan-resistant, so the hot set may
+  survive, but nearly all of the refresh work is thrown away. Entries for hot orders also aren't guaranteed to be
+  the ones kept.
+- ***Health lies quietly*** — `OrdersCacheHealthIndicator` reports UP as long as there is at least one entry, with
+  `lastRefreshCount: 5000000`. Nothing flags that the design no longer fits.
+- ***Fix***:
+
+| Option                                                                   | Trade-off                                                                       |
+|--------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| ***Drop the full refresh; let `@Cacheable` fill on demand***, plus `refreshAfterWrite` with a `CacheLoader` bean (Boot attaches it to the `CaffeineCacheManager`) | only keys that are actually read get reloaded, asynchronously; the first read of a key is a miss |
+| Warm only the hot set (e.g. orders from the last N days, or the top N ids by access) | needs a definition of "hot"; still a query per cycle                     |
+| Page through with keyset pagination (`id > :last ORDER BY id LIMIT 1000`) | bounded memory, but still a full scan and pointless once the table ≫ cache size |
+| Event-driven invalidation (write → evict/put) instead of polling          | needs a write path and a broadcast across instances ([Q5](#qa-create-order-design)) |
+
+- ***Interview point*** — a cache warmer that loads "everything" only makes sense while everything fits in the
+  cache. Revisit it when `table rows / maximumSize` grows past about 1.
+
+<a id="qa-postgres-outage-readiness"></a>
+
+**Q3. 🔥 Postgres is down for two minutes. What do readiness, Eureka, the gateway and callers see, and should `db` be
+in the readiness group?**
+
+- ***Readiness turns DOWN, but nothing in this stack routes on readiness, so traffic keeps coming.*** That's lucky
+  here: the cache can still serve most reads.
+
+| Observer                              | What it sees                                                                                                   |
+|---------------------------------------|----------------------------------------------------------------------------------------------------------------|
+| `/actuator/health/readiness`          | DOWN (`include: readinessState,db`)                                                                            |
+| `/actuator/health/liveness`           | UP. Correct: a restart can't fix the DB                                                                        |
+| `/actuator/health` → SBA              | DOWN with a 503 body, so SBA shows DOWN, not OFFLINE                                                           |
+| Eureka status                         | still UP: `eureka.client.healthcheck.enabled` isn't set, so actuator health isn't propagated                   |
+| Gateway                               | keeps routing `/api/orders/**` here                                                                            |
+| `GET /api/orders/{id}`, cached id     | ***200***. Entries live 10 min after the last successful refresh, and the failed refreshes just log errors     |
+| `GET /api/orders`, cache misses       | each request blocks for Hikari's `connection-timeout` (default 30 s), then returns 500 from `ApiExceptionHandler` |
+
+- ***The hidden danger is thread exhaustion, not the errors.*** 200 Tomcat threads ÷ 30 s per miss ≈ ***7 misses/s***
+  before every thread is stuck waiting for a connection. After that, even cache hits queue. Set Hikari
+  `connection-timeout` to a couple of seconds so misses fail fast with 503.
+- ***Should `db` be in readiness?*** It depends on who reads readiness:
+  - ***Kubernetes*** removes every pod from the Service when readiness fails. A shared dependency in readiness
+    takes ***all replicas out at once***, which turns a partial outage (misses fail) into a total one (hits fail
+    too). It also gives you no way to return a useful 503.
+  - ***Eureka with `healthcheck.enabled: true`*** behaves the same way: all instances go DOWN, and the gateway
+    returns 503 for everything.
+  - ***Keep `db` in readiness*** only if the service is useless without the DB. Then removing it from rotation is
+    honest, and callers fail over to a fallback or another region.
+- ***This service can degrade (cache + `user: null`), so take `db` out of readiness***. Keep it in
+  `/actuator/health` for dashboards. Handle the DB outage in code: fast timeouts, a circuit breaker around the
+  repository, and `503 + Retry-After`.
+- ***Restart trap*** — Flyway runs at startup and needs Postgres, so an instance restarted during the outage can't
+  start at all. That's another reason liveness must never include `db`.
+
+<a id="qa-jdbc-session-cost"></a>
+
+**Q4. 🔥 What does Spring Session JDBC cost at 3 instances and 10× browser users, and what risk hides in
+`csrf.ignoringRequestMatchers("/api/**")` once sessions exist?**
+
+- ***Every request from a logged-in browser becomes database traffic on the same Postgres and pool as the orders.***
+  Spring Session reads the session row and its attributes, then writes `LAST_ACCESS_TIME` / `EXPIRY_TIME` back
+  ([§5](#security)).
+- ***Costs***:
+  - ***Per request*** — a SELECT (session + attributes) and an UPDATE. 1,000 active browser users at 1 req/s means
+    roughly 2,000 extra statements/s, all through Hikari's default pool of 10 connections that orders also use. When
+    the session store slows down, order reads slow down with it.
+  - ***Cleanup*** — the expired-session job runs on a cron (default every minute) on ***every instance***, so three
+    instances issue overlapping `DELETE … WHERE EXPIRY_TIME < ?` against the same index.
+  - ***Coupling*** — a DB outage now also breaks authentication for every session-based request
+    ([Q3](#qa-postgres-outage-readiness)).
+  - ***Serialisation*** — the `SecurityContext` is stored as JDK-serialised bytes in `ATTRIBUTE_BYTES`. During a
+    rolling upgrade that changes Spring Security, old and new instances may not deserialise each other's sessions.
+    Check the compatibility notes for that upgrade, or switch to JSON serialisation.
+- ***Basic-auth API calls create no sessions***, so service-to-service traffic (gateway, SBA, `UserClient` callers)
+  costs nothing here. The cost is only from browser logins, which exist purely to demo `/actuator/sessions`.
+- ***The CSRF trap*** — CSRF is ignored for `/api/**` on the assumption that API clients are stateless. A browser
+  that logged in through `/login` sends the `SESSION` cookie to `/api/**` too, so cookie-authenticated API calls get
+  no CSRF protection. Today every `/api/**` endpoint is a GET, so there is nothing to forge. ***The first `POST /api/orders`
+  becomes forgeable***, limited only by the cookie's `SameSite=Lax` default and its same-site caveats
+  ([admin-server Q8](../admin-server/README.md#qa-csrf-exemption-scope)).
+- ***Better design***:
+
+| Need                   | Choice                                                                                           |
+|------------------------|--------------------------------------------------------------------------------------------------|
+| API                    | stateless (`SessionCreationPolicy.STATELESS`), Basic → bearer tokens; CSRF not needed for header auth |
+| Browser UI, if any     | a separate filter chain for UI paths with CSRF on                                                 |
+| Shared sessions        | a store with native TTL (Redis) instead of the business database: no cleanup cron, separate failure domain |
+| Keep JDBC sessions     | a separate pool or database, and cleanup on one instance only                                     |
+
+<a id="qa-create-order-design"></a>
+
+**Q5. 🔥🔥 Add `POST /api/orders` that checks the user exists. Design it for client retries, 3 instances with local
+caches and a flaky `user-service`.**
+
+***Make the write idempotent with a client key, decide explicitly what "user check failed" means, and accept that
+local caches need either broadcast invalidation or nothing mutable in them.*** The current code has three traps:
+`orders.id` has no generator (`BIGINT PRIMARY KEY` in V1), `UserClient` maps ***every*** failure to `Optional.empty()`,
+and each instance has its own Caffeine cache.
+
+- ***Idempotency*** — the client sends an `Idempotency-Key` header. Insert the order and a row in
+  `idempotency_keys(key PRIMARY KEY, request_hash, response, created_at)` ***in one transaction***.
+  - A retry with the same key returns the stored response, even if the first response was lost after commit.
+  - The same key with a different body → `422`. A concurrent duplicate hits the primary key → wait, then return
+    the stored result.
+- ***Id generation*** — Flyway V4: `GENERATED BY DEFAULT AS IDENTITY` starting above the seeded 106, or
+  application-generated UUIDv7 if ids must exist before the insert (for example, to put them in events).
+- ***User check — what `UserClient` must distinguish*** (today 404, 401, 5xx and timeout all look the same):
+
+| `user-service` answer | Order API should                                  |
+|-----------------------|---------------------------------------------------|
+| 200                   | accept → `201 Created` + `Location`                |
+| 404                   | `422` "unknown user" (a client error, don't retry) |
+| 401/403               | `500` + alert: our credentials broke, not the client's fault |
+| 5xx / timeout / open breaker | `503 + Retry-After`, ***or*** accept as `PENDING` and validate asynchronously |
+
+- ***Sync vs async validation*** — sync means order availability can never be higher than `user-service`
+  availability (and the slow-dependency cascade from root
+  [FAQ 7.11](../README.md#faq-slow-downstream-cascade) now affects writes). Async (`PENDING` → `CONFIRMED`/`REJECTED`)
+  keeps orders writable but pushes a state machine onto the client. A third option is a local read model of user ids
+  fed by user events: fast and independent, but eventually consistent (a user deleted a second ago can still order).
+- ***Caches across 3 instances***:
+  - ***Creates are safe*** — misses aren't cached (`unless = "#result == null"`), so a new order is a DB hit on any
+    instance and shows up right away.
+  - ***Updates and cancellations aren't*** — the instance that wrote can `@CachePut`, but the other two serve the
+    old order for up to 5 min (until the refresher runs). Either broadcast invalidations (Postgres
+    `LISTEN/NOTIFY`, a Kafka topic, Redis pub/sub), move to a shared cache, or don't cache mutable state at all.
+- ***Telling other services*** — write an `OrderPlaced` row to an ***outbox table in the same transaction***, and
+  relay it with a poller or CDC. Delivery is at least once, so consumers de-duplicate on the order id.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant O as order-service
+    participant U as user-service
+    participant DB as Postgres (orders)
+    C->>O: POST /api/orders (Idempotency-Key: k1)
+    O->>DB: key k1 seen?
+    DB-->>O: no
+    O->>U: GET /api/users/{id} (timeout, breaker)
+    U-->>O: 200
+    O->>DB: BEGIN; insert order + idempotency k1 + outbox; COMMIT
+    O-->>C: 201 Location /api/orders/107
+    Note over C,O: response lost → client retries with k1
+    C->>O: POST /api/orders (k1)
+    O->>DB: key k1 seen? → stored 201
+    O-->>C: same 201, no second order
+```
+
+- ***Security*** — this is the first unsafe `/api/**` method, so the CSRF and session issue in
+  [Q4](#qa-jdbc-session-cost) becomes real. Use stateless auth for this API.
+- ***Monitor*** — idempotent replays per minute (a spike means clients are timing out), `PENDING` age, outbox lag,
+  and 503s caused by `user-service`.
+
+<a id="qa-exactly-once-job"></a>
+
+**Q6. 🔥🔥 Turn `HeartbeatJob` into a nightly billing job that must run exactly once across 3 instances, survive a node
+crash mid-run and never double-bill.**
+
+***No scheduler gives you exactly once. Get "one node at a time, re-run on failure" from a clustered scheduler, then
+make the job idempotent so a re-run bills nothing twice.*** Today `spring.quartz.job-store-type: memory`, so each
+instance has its own scheduler and the job runs ***3×***.
+
+- ***Step 1 — one firing per trigger, cluster-wide.*** Switch Quartz to a clustered JDBC store:
+
+```yaml
+spring:
+  quartz:
+    job-store-type: jdbc
+    jdbc:
+      initialize-schema: never          # QRTZ_* tables via Flyway, like V3__spring_session.sql
+    properties:
+      org.quartz.scheduler.instanceId: AUTO
+      org.quartz.jobStore.isClustered: true
+      org.quartz.jobStore.clusterCheckinInterval: 10000
+```
+
+  - Nodes take a row lock in `QRTZ_LOCKS` to acquire a trigger, so only one node fires each occurrence.
+  - Annotate the job `@DisallowConcurrentExecution` (no overlap, cluster-wide with a JDBC store) and give the
+    `JobDetail` `.requestRecovery(true)`. When a node stops checking in, another node re-runs its in-flight jobs.
+  - Keep node clocks in sync with NTP. Quartz clustering relies on it.
+- ***Step 2 — what recovery means*** — the crashed node may have billed 40 % of customers. Recovery re-runs the
+  ***whole*** job, so delivery is ***at least once*** by design.
+- ***Step 3 — idempotent job***:
+  - A `billing_run(period PRIMARY KEY, status, started_at, finished_at)` row: the run for `2026-10` either exists or
+    it doesn't.
+  - `invoice UNIQUE (customer_id, period)`: a re-run skips customers already invoiced (`INSERT … ON CONFLICT DO
+    NOTHING`).
+  - Process in chunks with a checkpoint, so recovery resumes instead of starting over.
+  - Side effects outside the DB (charging a card, sending email) go through an outbox with an idempotency key sent
+    to the payment provider. Never call them directly from the loop.
+- ***Missed runs*** — if every node is down at 02:00, the misfire instruction decides what happens at startup:
+  fire now (catch up) or skip. For billing, catch up. The idempotent run makes that safe.
+- ***Alternatives***:
+
+| Option                                  | Good for                         | Watch out                                                                  |
+|-----------------------------------------|----------------------------------|----------------------------------------------------------------------------|
+| Quartz clustered JDBC (above)           | jobs that are already Quartz, misfire policies, SBA Quartz view | more tables, row-lock contention with many triggers                         |
+| ShedLock on `@Scheduled`                | simple "only one node" locking   | if a run outlasts `lockAtMostFor`, a second node starts: overlap            |
+| Kubernetes `CronJob` (`concurrencyPolicy: Forbid`) | jobs separate from the service | still at least once; pod start latency; a separate deployable               |
+| Leader election (one node runs everything) | many small jobs               | failover delay, and one node does all the work                             |
+
+- ***Don't "fix" `OrderCacheRefresher` the same way*** — it fills a ***per-instance*** Caffeine cache, so it has to run
+  on every instance. Cluster-locking it would leave two caches cold.
+- ***Monitor*** — a `last_success_timestamp` gauge per job with an alert if it's older than 26 h, run duration, and
+  rows skipped by `ON CONFLICT` (a non-zero count means a re-run happened).

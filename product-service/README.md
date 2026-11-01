@@ -12,6 +12,11 @@
 8. ⚠️ [Gotchas](#gotchas)
 9. ❓ [Q&A](#qa)
     - 9.1 [What are the different ways Spring Boot Admin can call `product-service`, and what does `product-service` need for each?](#qa-sba-call-options)
+    - 9.2 🔥 [Prices are `BigDecimal` in Java and `NUMERIC(10,2)` in Postgres — where can money still go wrong between the database and a browser?](#qa-money-bigdecimal-pitfalls)
+    - 9.3 🔥 [The catalogue is identical for every caller and read far more than it changes — why does nothing cache it today, and where would you cache it, given Basic auth on `/api/**`?](#qa-http-caching-basic-auth)
+    - 9.4 🔥 [`/actuator/jolokia` is exposed, with CSRF off for `/actuator/**` — what can a caller with the credentials actually do to the JVM, and how do you lock it down?](#qa-jolokia-attack-surface)
+    - 9.5 🔥🔥 [Add a `currency` column and rename `name` to `title` while 2 instances keep serving — design the Flyway migrations for zero downtime and rollback](#qa-zero-downtime-schema-change)
+    - 9.6 🔥🔥 [Orders store the product as free text (`'Keyboard'`) with no id and no price — redesign how `order-service` references `product-service` data](#qa-order-product-reference)
 
 Part of the [learning-spring-cloud](../README.md) demo: a small Spring MVC
 service that serves a fixed product catalogue, registers with Eureka, sits behind
@@ -527,3 +532,178 @@ Kubernetes `Service`; name a separate actuator port `management` in the Service'
   hence `csrf.ignoringRequestMatchers("/actuator/**")` in this module's `SecurityConfig`.
 - ***Public paths*** — `/actuator/health/**` and `/actuator/info` are `permitAll()` here, so status still shows even
   with wrong credentials; the other views then fail with `401`.
+
+<a id="qa-money-bigdecimal-pitfalls"></a>
+
+**Q2. 🔥 Prices are `BigDecimal` in Java and `NUMERIC(10,2)` in Postgres. Where can money still go wrong between the
+database and a browser?**
+
+- ***`BigDecimal` is exact only while the value stays in Java.*** There are three places it stops being exact or
+  complete: the schema, `equals`, and the JSON boundary.
+- ***No currency*** — `Product(Long id, String name, BigDecimal price)` says `49.99` but not *what*. Adding currencies
+  later breaks `NUMERIC(10,2)` too: JPY has 0 decimal places, BHD has 3. Money is `(amount, currency)`, with the
+  scale set per currency.
+- ***Silent rounding and overflow in Postgres*** — a value with more decimals is ***rounded*** to the column's scale
+  (`19.999` → `20.00`) without any error. Anything ≥ 100,000,000 fails with "numeric field overflow", which surfaces
+  as a 500 from `ApiExceptionHandler`'s catch-all, not a 400.
+- ***`equals` vs `compareTo`*** — `new BigDecimal("999.00").equals(new BigDecimal("999.0"))` is ***false*** (scale
+  differs). `Product` is a record, so its generated `equals` inherits this. Two products with the same price can be
+  unequal in tests, `Set`s and cache keys. Use `compareTo` (or `stripTrailingZeros`) when comparing amounts.
+- ***JSON → JavaScript*** — Jackson writes `49.99` as a JSON ***number***, and `JSON.parse` turns it into an IEEE-754
+  double. Display is fine, but arithmetic in the browser (cart totals, discounts) drifts: `0.1 + 0.2 !== 0.3`.
+
+| Wire format                         | Pros                                     | Cons                                        |
+|-------------------------------------|------------------------------------------|---------------------------------------------|
+| JSON number `49.99` (today)         | natural, what OpenAPI shows              | clients parse to double                     |
+| String `"49.99"` (`@JsonFormat(shape = STRING)`) | exact in every language        | clients must parse it into a decimal type   |
+| Integer minor units `4999` + `"EUR"` | exact, easy to sum                      | everyone must know the currency's scale     |
+
+- ***Creating values*** — `new BigDecimal(0.1)` captures the double's binary error. Use `new BigDecimal("0.1")` or
+  `BigDecimal.valueOf(0.1)`.
+- ***Arithmetic*** — tax and discounts need an explicit `RoundingMode` (often `HALF_EVEN`) and an agreed point at which
+  you round (per line or per total). An unbounded `divide` throws `ArithmeticException` on non-terminating results.
+- ***Interview point*** — price ***calculation*** belongs on the server. Clients get pre-computed totals as strings or
+  minor units and never do money arithmetic.
+
+<a id="qa-http-caching-basic-auth"></a>
+
+**Q3. 🔥 The catalogue is identical for every caller and read far more than it changes. Why does nothing cache it
+today, and where would you cache it, given Basic auth on `/api/**`?**
+
+- ***Two defaults turn caching off: Spring Security's headers and the HTTP rule for authenticated requests.***
+  - ***Spring Security adds `Cache-Control: no-cache, no-store, max-age=0, must-revalidate`*** (plus `Pragma` and
+    `Expires: 0`) to every response by default, so even the browser re-fetches. It steps back if the application
+    sets its own cache headers.
+  - ***RFC 9111*** — a ***shared*** cache (CDN, reverse proxy) must not reuse a response to a request that carried
+    `Authorization` unless the response explicitly allows it (`public`, `s-maxage`, or `must-revalidate`). Every
+    call here carries Basic credentials.
+- ***Decide first: is the catalogue public data?*** If a shared cache serves it to anyone, the 401 on `/api/products`
+  protects nothing. Either add `/api/products/**` to `app.security.public-paths` and cache freely, or keep it private
+  and cache only per client.
+- ***Where to cache***:
+
+| Layer                         | How                                                                                     | Saves                    | Catch                                                                                                 |
+|-------------------------------|-----------------------------------------------------------------------------------------|--------------------------|-------------------------------------------------------------------------------------------------------|
+| Browser / client              | `Cache-Control: private, max-age=60` from the controller                                | round-trips              | per client only; stale for up to `max-age`                                                            |
+| Conditional requests          | `ETag` + `If-None-Match` → `304`                                                        | bandwidth                | `ShallowEtagHeaderFilter` hashes the ***rendered*** body, so the DB query still runs; a cheap "deep" ETag needs a version or `updated_at` column (this table has none) |
+| CDN / shared proxy            | `Cache-Control: public, s-maxage=300`                                                   | origin load, latency     | only for public data; purge on change                                                                 |
+| In-process (Caffeine)         | `@Cacheable`, as in [order-service §4](../order-service/README.md#caching)              | DB reads                 | one cache per instance; invalidation across instances ([order-service Q5](../order-service/README.md#qa-create-order-design)) |
+
+- ***This service, as is*** — 6 rows, read-only, changes only through Flyway. The cheapest big win is
+  `Cache-Control` from the controller (`ResponseEntity.ok().cacheControl(CacheControl.maxAge(...))`) plus an in-process
+  cache invalidated at startup. A deploy is the only way data changes today.
+- ***Once prices change at runtime*** — a short TTL bounds how stale a price can be. Remember that the price a client
+  saw in a cached page must not be the price you charge ([Q6](#qa-order-product-reference)).
+
+<a id="qa-jolokia-attack-surface"></a>
+
+**Q4. 🔥 `/actuator/jolokia` is exposed, with CSRF off for `/actuator/**`. What can a caller with the credentials
+actually do to the JVM, and how do you lock it down?**
+
+- ***Jolokia is a JSON-over-HTTP bridge to JMX.*** It can read and write any MBean attribute and ***invoke any
+  operation*** on the platform MBean server (`POST /actuator/jolokia` with `{"type":"exec", ...}`). It powers SBA's
+  JMX view, and it reaches much further than the `heapdump`/`shutdown` endpoints the
+  [Gotchas](#gotchas) already flag.
+- ***What is reachable here*** — mostly JDK platform MBeans. Boot keeps its own JMX export off by default
+  (`spring.jmx.enabled` is false), so Spring beans, Hikari and Tomcat MBeans don't appear unless you turn them on:
+
+| MBean                                    | Abuse                                                                                         |
+|------------------------------------------|-----------------------------------------------------------------------------------------------|
+| `com.sun.management:type=HotSpotDiagnostic` | `dumpHeap` to ***any path the process can write*** (fill the disk, drop secrets somewhere readable); `setVMOption` on manageable flags |
+| `com.sun.management:type=DiagnosticCommand` | `jcmd` operations over HTTP: system properties (secrets passed as `-D`), VM flags, thread dumps; newer JDKs can also load agents, which means code execution if the attacker can place a file |
+| `java.lang:type=Memory`, `Threading`     | force GCs in a loop, enable expensive CPU-time tracking: cheap denial of service              |
+| Logback `JMXConfigurator` (only if `<jmxConfigurator/>` is in the logback config) | `reloadByURL` loads attacker-controlled config. This was the classic actuator-to-RCE chain in public write-ups |
+
+- ***Why CSRF matters here*** — Jolokia also accepts GET requests (`/actuator/jolokia/exec/...`), and the
+  `/actuator/**` CSRF exemption removes the token check for POSTs. Only the Basic credentials stand in the way, and
+  every module shares them (root [FAQ 7.10](../README.md#faq-shared-credentials-blast-radius)).
+- ***History*** — Jolokia has had its own CVEs (e.g. a JNDI injection in proxy mode in older 1.x releases). Keep it
+  patched (2.6.3 here, from `learning-bom`), and keep proxy mode off.
+- ***Lock down, in order of strength***:
+  1. ***Don't expose it in prod*** — drop `jolokia` from `exposure.include`. Micrometer metrics cover the "read a
+     number" use case without arbitrary `exec`.
+  2. ***Restrictor policy*** — a Jolokia access policy (`jolokia-access.xml`) that allows `read` on a short list of
+     MBeans and denies `exec`/`write`. See the `jolokia-support-springboot` docs for how to point at it.
+  3. ***Separate management plane*** — `management.server.port` on an internal interface, with its own
+     credentials and an admin role, not the API user.
+- ***Detect*** — audit events show who authenticated. Also alert on any `exec` request in the access log, and on
+  `.hprof` files appearing outside the expected directory.
+
+<a id="qa-zero-downtime-schema-change"></a>
+
+**Q5. 🔥🔥 Add a `currency` column and rename `name` to `title` while 2 instances keep serving. Design the Flyway
+migrations for zero downtime and rollback.**
+
+***Expand → migrate → contract, spread over separate releases, so the schema always works for both the old and the
+new code that run side by side during a rolling deploy.*** Never ship a destructive migration in the same release as
+the code that stops using the column.
+
+- ***How Flyway behaves here*** — each instance runs `db/migration` at startup:
+  - ***Concurrent starts are serialised*** — Flyway takes a lock (an advisory lock on PostgreSQL), so the second
+    instance waits, then finds the migration already applied.
+  - ***Postgres DDL is transactional*** — a failed script rolls back completely, with no half-applied schema.
+    Exception: statements like `CREATE INDEX CONCURRENTLY` can't run in a transaction and need Flyway's per-script
+    non-transactional option.
+  - ***Checksums*** — editing `V2__seed_products.sql` after it ran makes validation fail, so ***every new instance
+    refuses to start*** while the old ones keep serving. Never edit applied migrations; add `V3`.
+- ***Release plan***:
+
+| Release | Migration                                                                                     | Code                                                       | Old code still works? |
+|---------|-----------------------------------------------------------------------------------------------|------------------------------------------------------------|-----------------------|
+| N       | `V3`: `ADD COLUMN currency CHAR(3) NOT NULL DEFAULT 'EUR'`, `ADD COLUMN title VARCHAR(100)`, backfill `title = name` | unchanged (record still maps `name`)                      | yes: Spring Data JDBC selects explicit columns, so extra columns are ignored |
+| N+1     | none (or a trigger keeping `name`/`title` in sync if anything writes)                         | `Product(id, title, price, currency)`; API keeps `name` as a deprecated alias | yes: `name` is still there |
+| N+2     | `V4`: `title SET NOT NULL`, drop `name`, after the rollback window closes                      | alias removed once clients have migrated                   | N+1 code only        |
+
+- ***Locks are the real outage risk*** — `ADD COLUMN … DEFAULT <constant>` is metadata-only on modern Postgres, but
+  it still needs a brief `ACCESS EXCLUSIVE` lock. If a long query holds the table, the `ALTER` waits, and ***every
+  query queues behind the `ALTER`***. Start the script with `SET lock_timeout = '3s'` and retry the deploy rather
+  than stall traffic. Backfill large tables in batches, not in one `UPDATE`.
+- ***Rollback*** — Flyway Community has no undo. Rollback means ***redeploying the previous code against the expanded
+  schema***, which works by construction for N and N+1. N+2 is the only point of no return; take a backup or
+  snapshot first.
+- ***Also fix the seed*** — `V2__seed_products.sql` puts demo rows into every environment. Move seed data to a
+  location only dev/test load (for example, an extra entry in `spring.flyway.locations` per profile).
+- ***Startup migrations vs a migration job*** — with many replicas or slow migrations, run Flyway once as a pre-deploy
+  job and turn it off in the app (`spring.flyway.enabled: false`). Otherwise a startup probe can kill an instance
+  mid-migration. The trade-off: a separate deployable and ordering in the pipeline.
+- ***API contract*** — the JSON field rename is a breaking change for `gateway` clients and any consumer. Version it,
+  or keep both fields during N+1 (see the tolerant-reader point in
+  [user-service Q2](../user-service/README.md#qa-contract-drift-usersummary)).
+
+<a id="qa-order-product-reference"></a>
+
+**Q6. 🔥🔥 Orders store the product as free text (`'Keyboard'`) with no id and no price. Redesign how `order-service`
+references `product-service` data.**
+
+***Store both a stable reference (`product_id`) and an immutable snapshot of what the customer agreed to (name, unit
+price, currency at order time).*** The reference is for joins and analytics. The snapshot is the legal record.
+
+- ***What's wrong today*** (`orders.product VARCHAR(100)` vs `products(id 201–206, name, price)`, two separate
+  Postgres databases):
+  - ***Rename breaks the link*** — `Keyboard` → `Mechanical Keyboard` orphans every old order. Two products with the
+    same name are ambiguous.
+  - ***No price on the order*** — totals have to be looked up from the ***current*** catalogue, so a price change
+    rewrites history.
+  - ***No foreign key is possible*** across service databases. Integrity is the application's job.
+- ***Target order line***: `product_id BIGINT NOT NULL, product_name VARCHAR(100), unit_price NUMERIC(…), currency
+  CHAR(3), quantity INT` — the snapshot columns are written once and never updated.
+- ***Getting the price at checkout***:
+
+| Approach                                   | Consistency                                       | Availability / coupling                                    |
+|--------------------------------------------|---------------------------------------------------|------------------------------------------------------------|
+| Sync call to `product-service` on create   | price is current at commit time                   | orders depend on products being up (same trade-off as [order-service Q5](../order-service/README.md#qa-create-order-design)) |
+| Local catalogue replica fed by `ProductChanged` events | eventually consistent (seconds)       | independent; needs event infrastructure and replay         |
+| ***Price quote***: client gets a signed or stored quote (`quoteId`, price, expiry) and submits it | exact price shown = price charged; `409` if expired | one extra step; quotes must be tamper-proof          |
+
+- ***Price changed between viewing and paying*** — with quotes this is explicit: accept the quoted price until it
+  expires, then return `409 price changed`. Without quotes, the customer pays a price they never saw, or a cached
+  catalogue page ([Q3](#qa-http-caching-basic-auth)) shows a price you no longer honour.
+- ***Catalogue rules that make references safe*** — never reuse product ids, soft-delete (`discontinued`) instead of
+  deleting, and keep the price history (`valid_from`) if finance needs "price at time T" without the snapshot.
+- ***Migrating existing orders*** — a one-off job maps names to ids through `product-service`'s API (no cross-database
+  join). Unmatched or ambiguous names go to a review table. The old text column becomes `product_name` (the
+  snapshot).
+- ***Ownership*** — `product-service` owns the catalogue. `order-service` owns its snapshot and never writes product
+  data back. No shared database "to make joins easy".
+- ***Monitor*** — orders whose `product_id` is unknown to `product-service`, quote expiry and `409` rates, and replica
+  lag if you use events.
