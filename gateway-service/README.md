@@ -3,18 +3,22 @@
 ## <span style="color:hsl(151,80%,58%)">Table of contents</span>
 
 1. 🧭 [Overview](#overview)
-2. 🚀 [Run and credentials](#run-and-credentials)
-3. 🔐 [Security](#security)
-4. 📊 [Actuator endpoints](#actuator-endpoints)
-5. ⏱️ [Quartz job, logging and configuration](#quartz-logging-config)
-6. 🧪 [Tests](#tests)
-7. ⚠️ [Gotchas](#gotchas)
-8. ❓ [Q&A](#qa)
-    - 8.1 🔥 [The `gateway` actuator endpoint is `access: unrestricted` and `env` POST + `refresh` are on — what can someone holding the credentials do to the route table, and why is that worse than on a backend?](#qa-actuator-route-injection)
-    - 8.2 🔥 [Why are the service specs routed at `/api-docs/{service}` instead of `/v3/api-docs/{service}` — and what decides who wins when a gateway route and a local handler match the same path?](#qa-route-vs-handler-precedence)
-    - 8.3 🔥 [A teammate adds a `GlobalFilter` that checks an API key with a blocking JDBC lookup — what happens under load, and how do you catch and fix it?](#qa-blocking-in-filter)
-    - 8.4 🔥🔥 [Traffic grows 10× across 3 gateway instances — design per-client rate limiting, timeouts and circuit breaking at this edge, given that every client here logs in as the same `admin` user](#qa-edge-rate-limit-breaker)
-    - 8.5 🔥🔥 [Canary `user-service` v2 at 5 % of traffic through this gateway — how, given Eureka discovery and `order-service` calling `user-service` directly?](#qa-canary-release)
+2. 🔀 [How a request reaches a downstream service](#request-routing-flow)
+3. 🚀 [Run and credentials](#run-and-credentials)
+4. 🔐 [Security](#security)
+5. 📊 [Actuator endpoints](#actuator-endpoints)
+6. ⏱️ [Quartz job, logging and configuration](#quartz-logging-config)
+7. 🧪 [Tests](#tests)
+8. ⚠️ [Gotchas](#gotchas)
+9. ❓ [Q&A](#qa)
+    - 9.1 🔥 [The `gateway` actuator endpoint is `access: unrestricted` and `env` POST + `refresh` are on — what can someone holding the credentials do to the route table, and why is that worse than on a backend?](#qa-actuator-route-injection)
+    - 9.2 🔥 [Why are the service specs routed at `/api-docs/{service}` instead of `/v3/api-docs/{service}` — and what decides who wins when a gateway route and a local handler match the same path?](#qa-route-vs-handler-precedence)
+    - 9.3 🔥 [A teammate adds a `GlobalFilter` that checks an API key with a blocking JDBC lookup — what happens under load, and how do you catch and fix it?](#qa-blocking-in-filter)
+    - 9.4 🔥🔥 [Traffic grows 10× across 3 gateway instances — design per-client rate limiting, timeouts and circuit breaking at this edge, given that every client here logs in as the same `admin` user](#qa-edge-rate-limit-breaker)
+    - 9.5 🔥🔥 [Canary `user-service` v2 at 5 % of traffic through this gateway — how, given Eureka discovery and `order-service` calling `user-service` directly?](#qa-canary-release)
+    - 9.6 🔥 [What are the drawbacks of Spring Cloud LoadBalancer, which picks the instance for every `lb://` route here?](#qa-loadbalancer-drawbacks)
+    - 9.7 [Does Spring Cloud LoadBalancer need Redis?](#qa-loadbalancer-redis)
+    - 9.8 [Which load-balancing strategies does Spring Cloud LoadBalancer offer, and how would you switch the gateway to one?](#qa-loadbalancer-strategies)
 
 API gateway module of [learning-spring-cloud](../README.md). The project-wide
 picture (all 6 modules, Eureka registry flow, Spring Boot Admin) lives in the root
@@ -57,16 +61,74 @@ README; this file covers only what `gateway-service` itself implements.
 
 - ***No `StripPrefix` / `RewritePath`*** — `/api/users/1` arrives downstream as `/api/users/1`, matching the backends'
   own controller mappings.
-- ***No `RemoveRequestHeader=Authorization`*** — deliberate, see [§3](#security).
+- ***No `RemoveRequestHeader=Authorization`*** — deliberate, see [§4](#security).
 - ***`lb://` = load-balanced service ID*** — Spring Cloud LoadBalancer's `ReactiveLoadBalancerClientFilter` looks the ID
   up in the gateway's local Eureka cache (refreshed every 30s by default), picks an instance (round-robin by default),
-  and rewrites the request to that instance's `host:port`. Full walk-through with
-  diagram: [root README §2](../README.md#how-the-gateway-finds-services-via-eureka).
+  and rewrites the request to that instance's `host:port`. Step by step in [§2](#request-routing-flow); registry
+  side: [root README §2](../README.md#how-the-gateway-finds-services-via-eureka).
 - ***Inspect the live route table*** — `GET /actuator/gateway/routes` (authenticated).
+
+<a id="request-routing-flow"></a>
+
+## <span style="color:hsl(201,80%,58%)">2. 🔀 How a request reaches a downstream service</span>
+
+- ***The Eureka client doesn't route anything.*** On the request path it only answers "which instances does
+  `USER-SERVICE` have?" — and it answers from ***its local in-memory registry copy***, not by calling `eureka-server`.
+  ***Spring Cloud LoadBalancer*** picks the instance; ***Reactor Netty*** sends the request.
+- ***One request, `GET /api/users/1`*** (class names checked against Gateway 5.0.3, eureka-client 5.0.2,
+  loadbalancer 5.0.3, as of 2026):
+
+```text
+client ─► gateway-service :8080
+  1. RoutePredicateHandlerMapping       Path=/api/users/** matches route user-service (uri: lb://USER-SERVICE)
+  2. RouteToRequestUrlFilter            target URL = lb://USER-SERVICE/api/users/1
+  3. ReactiveLoadBalancerClientFilter   lb:// scheme ──► Spring Cloud LoadBalancer
+       RoundRobinLoadBalancer.choose()
+         └─ CachingServiceInstanceListSupplier             (cache.ttl 35 s)
+              └─ DiscoveryClientServiceInstanceListSupplier
+                   └─ EurekaReactiveDiscoveryClient.getInstances("USER-SERVICE")
+                        └─ Eureka client's local registry copy   ◄── no network call
+       picks 192.168.1.20:8081 → URL rewritten to http://192.168.1.20:8081/api/users/1
+  4. NettyRoutingFilter                 Reactor Netty HttpClient calls that instance directly
+```
+
+- ***Who owns which step*** — steps 1, 2 and 4 are Gateway; choosing the instance in step 3 is Spring Cloud
+  LoadBalancer; the Eureka client is only the ***data source*** at the bottom of step 3.
+
+<a id="request-routing-eureka-client-jobs"></a>
+
+**Everything the Eureka client does in this module**
+
+| Job | When | Network call to `eureka-server`? |
+|---|---|---|
+| Register `GATEWAY-SERVICE` | startup | yes |
+| Heartbeat | every 10 s (`lease-renewal-interval-in-seconds: 10`) | yes |
+| Fetch the registry (full, then deltas) | startup, then every 30 s (default `registry-fetch-interval-seconds`, not overridden here) | yes |
+| ***Answer `getInstances()` during routing*** | ***every request*** (the balancer caches the result for 35 s) | ***no — local copy*** |
+| Return only `UP` instances | every lookup | no (`filter-only-up-instances`, default `true`) |
+| Expose instance metadata (zone, IP/port via `prefer-ip-address`, weight/hint tags) | every lookup | no — read by the balancer's zone/weighted/hint filters ([Q8](#qa-loadbalancer-strategies)) |
+
+**Two less obvious roles**
+
+- ***It brings in the load balancer*** — [pom.xml](pom.xml) doesn't declare `spring-cloud-starter-loadbalancer`; the
+  dependency tree shows it arriving through `spring-cloud-starter-netflix-eureka-client`. So the Eureka starter is
+  why `lb://` works at all, even though the balancing code isn't part of it.
+- ***It decides what the balancer can see*** — `DOWN` and `OUT_OF_SERVICE` instances are filtered out before
+  balancing. That's why marking an instance `OUT_OF_SERVICE` drains it (root
+  [FAQ: zero-error rolling deploy](../README.md#faq-zero-error-rolling-deploy)), and why a crashed instance that Eureka
+  hasn't evicted yet still gets traffic ([Q6](#qa-loadbalancer-drawbacks)).
+
+**What follows from this**
+
+- ***`eureka-server` down → routing keeps working*** from the last local copy; the gateway just learns nothing new
+  (root [FAQ: gateway cache](../README.md#faq-gateway-cache)).
+- ***Eureka is swappable*** — Gateway and LoadBalancer only use the `ReactiveDiscoveryClient` abstraction, so Consul,
+  the Kubernetes discovery client or a static list (`spring.cloud.discovery.client.simple.instances`) can replace it
+  with no route changes.
 
 <a id="run-and-credentials"></a>
 
-## <span style="color:hsl(66,80%,50%)">2. 🚀 Run and credentials</span>
+## <span style="color:hsl(66,80%,50%)">3. 🚀 Run and credentials</span>
 
 - ***Start `eureka-server` first***, then the backends, then the gateway
   (order: [root README §4](../README.md#run-order)).
@@ -82,7 +144,7 @@ ACTUATOR_USER=ops ACTUATOR_PASSWORD=s3cret mvn -pl gateway-service spring-boot:r
   `ACTUATOR`.
 - ***The same values are reused three times*** — to log in to the gateway, embedded in the Eureka `defaultZone` URL, and
   published as Eureka metadata for SBA. Change the env vars on every module together, because the backends check the
-  same header (see [§3](#security)).
+  same header (see [§4](#security)).
 
 ```bash
 # Through the gateway (Basic creds checked by the gateway AND by the downstream service)
@@ -104,7 +166,7 @@ curl -i http://localhost:8080/api/users
 
 <a id="security"></a>
 
-## <span style="color:hsl(256,80%,58%)">3. 🔐 Security</span>
+## <span style="color:hsl(256,80%,58%)">4. 🔐 Security</span>
 
 Implemented in [SecurityConfig.java](src/main/java/com/learning/discovery/gateway/config/SecurityConfig.java)
 (`@EnableWebFluxSecurity`).
@@ -181,7 +243,7 @@ sequenceDiagram
 
 <a id="actuator-endpoints"></a>
 
-## <span style="color:hsl(33,80%,58%)">4. 📊 Actuator endpoints</span>
+## <span style="color:hsl(33,80%,58%)">5. 📊 Actuator endpoints</span>
 
 All exposed via `management.endpoints.web.exposure.include` in [application.yml](src/main/resources/application.yml).
 Only `health` and `info` are public; the rest need Basic auth. SBA (`admin-server`) authenticates with the `user.name` /
@@ -206,9 +268,9 @@ Only `health` and `info` are public; the rest need Basic auth. SBA (`admin-serve
 | `restart`       | Restart button                                     | `access: unrestricted`; endpoint from Spring Cloud Context                                                                                                                                      |
 | `httpexchanges` | HTTP Exchanges                                     | `InMemoryHttpExchangeRepository` bean in [ActuatorConfig.java](src/main/java/com/learning/discovery/gateway/config/ActuatorConfig.java); recorded by `HttpExchangesWebFilter` (WebFlux variant) |
 | `startup`       | Startup                                            | `BufferingApplicationStartup(2048)` set in `main()` of [GatewayServiceApplication.java](src/main/java/com/learning/discovery/gateway/GatewayServiceApplication.java)                            |
-| `auditevents`   | Audit Events                                       | `InMemoryAuditEventRepository` bean + auditing auth manager ([§3](#security))                                                                                                                   |
+| `auditevents`   | Audit Events                                       | `InMemoryAuditEventRepository` bean + auditing auth manager ([§4](#security))                                                                                                                   |
 | `sbom`          | SBOM                                               | root `cyclonedx-maven-plugin` writes `META-INF/sbom/application.cdx.json` at build time                                                                                                         |
-| `quartz`        | Quartz                                             | `spring.quartz.job-store-type: memory` + `HeartbeatJob` ([§5](#quartz-logging-config))                                                                                                          |
+| `quartz`        | Quartz                                             | `spring.quartz.job-store-type: memory` + `HeartbeatJob` ([§6](#quartz-logging-config))                                                                                                          |
 
 - ***`startup` only exists when launched via `main()`*** — `@SpringBootTest` builds its own `SpringApplication` and
   skips `main()`, so there is no `BufferingApplicationStartup` and `/actuator/startup` is absent in tests.
@@ -237,7 +299,7 @@ curl -u admin:admin -X POST http://localhost:8080/actuator/refresh
 
 <a id="quartz-logging-config"></a>
 
-## <span style="color:hsl(171,80%,58%)">5. ⏱️ Quartz job, logging and configuration</span>
+## <span style="color:hsl(171,80%,58%)">6. ⏱️ Quartz job, logging and configuration</span>
 
 **Quartz demo job** ([job/](src/main/java/com/learning/discovery/gateway/job)):
 
@@ -318,7 +380,7 @@ management:
 
 <a id="tests"></a>
 
-## <span style="color:hsl(0,80%,58%)">6. 🧪 Tests</span>
+## <span style="color:hsl(0,80%,58%)">7. 🧪 Tests</span>
 
 [GatewayServiceApplicationIT.java](src/test/java/com/learning/discovery/gateway/GatewayServiceApplicationIT.java) —
 `@SpringBootTest(webEnvironment = RANDOM_PORT)` + `@AutoConfigureWebTestClient` +
@@ -339,7 +401,7 @@ management:
 
 <a id="gotchas"></a>
 
-## <span style="color:hsl(306,80%,58%)">7. ⚠️ Gotchas</span>
+## <span style="color:hsl(306,80%,58%)">8. ⚠️ Gotchas</span>
 
 - ***503 Service Unavailable on `/api/**`*** — the gateway authenticated you but LoadBalancer found no instance for
   `USER-SERVICE` etc.: backend not started, not yet registered, or the gateway's registry cache hasn't refreshed (up
@@ -363,7 +425,7 @@ management:
 
 <a id="qa"></a>
 
-## <span style="color:hsl(116,80%,58%)">8. ❓ Q&A</span>
+## <span style="color:hsl(116,80%,58%)">9. ❓ Q&A</span>
 
 <a id="qa-actuator-route-injection"></a>
 
@@ -374,7 +436,7 @@ holding the credentials do to the route table, and why is that worse than on a b
   `POST /actuator/gateway/refresh`, adds a live route to ***any*** URI — no restart, no config change in Git.
   `POST /actuator/env` + `POST /actuator/refresh` does the same via properties.
 - ***Why the gateway is the worst place for this***:
-  - ***Credential exfiltration*** — routes forward the caller's `Authorization` header unchanged ([§3](#security)).
+  - ***Credential exfiltration*** — routes forward the caller's `Authorization` header unchanged ([§4](#security)).
     A route `Path=/api/users/**` → `https://attacker.example` (ordered before the real one) harvests every user's
     Basic credentials while still proxying the response, so nobody notices.
   - ***SSRF*** — a route to `http://169.254.169.254/` or an internal admin port turns the gateway into a proxy into
@@ -537,3 +599,82 @@ routes; a gateway-only canary leaks, because `order-service` reaches `user-servi
   minutes to fully apply.
 - ***Decide with data*** — tag spans and metrics with the instance version (a `version` resource attribute or tag),
   compare v1 vs v2 error rate and p99 in Zipkin and metrics; automate promote/rollback on thresholds.
+
+<a id="qa-loadbalancer-drawbacks"></a>
+
+**Q6. 🔥 What are the drawbacks of Spring Cloud LoadBalancer, which picks the instance for every `lb://` route here?**
+
+- ***Where it comes from here*** — `gateway-service/pom.xml` doesn't declare it: `spring-cloud-starter-loadbalancer`
+  arrives transitively (5.0.3 as of 2026). For each `lb://USER-SERVICE` request the gateway's
+  `ReactiveLoadBalancerClientFilter` asks a `RoundRobinLoadBalancer` for an instance from Eureka's cached list
+  (root [FAQ: load balancing](../README.md#faq-load-balancing), [why LoadBalancer](../README.md#faq-why-loadbalancer)).
+  There's no `spring.cloud.loadbalancer.*` config in this module, so everything below runs on defaults.
+- ***Drawbacks***
+
+| # | Drawback | What it means in this module |
+|---|---|---|
+| 1 | ***Blind algorithms*** — only round robin and random are built in | No least-connections or latency awareness: an instance stuck on slow Postgres queries still gets every Nth request |
+| 2 | ***Stale instance list*** — three caches stack up | Eureka eviction (~60–90 s after a crash, [eureka Q2](../eureka-server/README.md#qa-crash-eviction-timeline)) + this gateway's registry fetch (default 30 s, not overridden here) + the balancer's own cache (`spring.cloud.loadbalancer.cache.ttl`, default 35 s) → a dead instance can keep getting traffic for a minute or more ([root FAQ: worst case](../README.md#faq-worst-case-detection)) |
+| 3 | ***No outlier ejection*** | An instance that is `UP` in Eureka but returns 500s keeps its full share. Envoy-style meshes eject it automatically; here you need a circuit breaker plus retry ([Q4](#qa-edge-rate-limit-breaker)) |
+| 4 | ***No retry by default*** | No `Retry` filter on these routes, so a request that lands on a dead instance fails to the client. `spring.cloud.loadbalancer.retry.*` applies to `@LoadBalanced` clients; the gateway's own `Retry` route filter is the gateway equivalent (idempotent methods only) |
+| 5 | ***Default cache in production*** | Caffeine isn't on this module's classpath, so the balancer uses its simple built-in cache and logs a startup warning recommending Caffeine. Adding `com.github.ben-manes.caffeine:caffeine` switches it (`spring-context-support`, the other requirement, already comes in through Quartz) |
+| 6 | ***No global view*** | Each of the 3 gateway instances ([Q4](#qa-edge-rate-limit-breaker)) keeps its own round-robin counter; they don't coordinate, and with few instances the spread can be uneven for short periods |
+| 7 | ***Health checks multiply*** | The optional `health-check` filter makes ***every*** gateway instance probe ***every*** backend instance (`interval` default 25 s): callers × instances requests to `/actuator/health` |
+| 8 | ***Java-only library*** | Every caller configures it separately (`order-service` has its own `@LoadBalanced` client, [root FAQ](../README.md#faq-order-calls-user)); a non-Java client can't use it. A mesh or server-side LB does it once for everyone |
+| 9 | ***Long-lived connections*** | HTTP/2 or WebSocket connections are balanced once, at connect time — later requests on that connection don't rebalance |
+
+- ***When it's still the right choice*** — no extra network hop or proxy to run, and it works anywhere Eureka works.
+  On Kubernetes the cluster's `Service` already balances, so this layer usually adds little ([root FAQ: Kubernetes](../README.md#faq-migrate-to-kubernetes)).
+
+<a id="qa-loadbalancer-redis"></a>
+
+**Q7. Does Spring Cloud LoadBalancer need Redis?**
+
+- ***No.*** It runs ***in memory inside each caller*** (here, inside every `gateway-service` instance):
+  - the instance list comes from the local Eureka registry copy and is cached in the JVM (`cache.ttl` 35 s);
+  - the round-robin position, sticky choices and retry state also live in the caller;
+  - nothing is shared between callers, so there's nothing to put in Redis.
+- ***Where Redis does appear in Spring Cloud*** — the gateway's `RequestRateLimiter` filter with `RedisRateLimiter`,
+  which needs a shared counter across gateway instances ([Q4](#qa-edge-rate-limit-breaker)), and Spring Session.
+  Neither is load balancing, and this module uses neither (no Redis dependency in `pom.xml`).
+- ***Sticky sessions don't need Redis either*** — `request-based-sticky-session` keeps the chosen instance in a cookie
+  (`sc-lb-instance-id` by default) that the client sends back.
+
+<a id="qa-loadbalancer-strategies"></a>
+
+**Q8. Which load-balancing strategies does Spring Cloud LoadBalancer offer, and how would you switch the gateway to one?**
+
+- ***Two layers*** — an ***algorithm*** picks one instance; ***instance-list filters*** first narrow down which
+  instances the algorithm can pick from. Names below checked against `spring-cloud-loadbalancer` 5.0.3 (as of 2026).
+
+| Layer | Strategy | What it does | How to enable |
+|---|---|---|---|
+| Algorithm | `RoundRobinLoadBalancer` ***(default, used here)*** | Cycles through instances, one counter per gateway instance | nothing |
+| Algorithm | `RandomLoadBalancer` | Random pick | `ReactorLoadBalancer` bean in a `@LoadBalancerClient` config |
+| Algorithm | Custom | Your own `ReactorServiceInstanceLoadBalancer.choose()` — least-connections, latency-aware, hash on a user ID | same as above |
+| Filter | `default` ***(used here)*** | Discovery client + cache | `spring.cloud.loadbalancer.configurations=default` |
+| Filter | `zone-preference` | Prefer instances in the caller's zone (`spring.cloud.loadbalancer.zone`) | `configurations=zone-preference` |
+| Filter | `health-check` | Caller probes each instance and drops failing ones (`health-check.interval` 25 s) | `configurations=health-check` |
+| Filter | `same-instance-preference` | Stick to the previously chosen instance while it's available | `configurations=same-instance-preference` |
+| Filter | `request-based-sticky-session` | Route by the `sc-lb-instance-id` cookie | `configurations=request-based-sticky-session` + `sticky-session.add-service-instance-cookie=true` |
+| Filter | `weighted` | Share of traffic by a weight in instance metadata | `configurations=weighted` |
+| Filter | `subset` | Each caller uses only a deterministic subset of instances (`subset.size`, default 100) — fewer connections in big fleets | `configurations=subset` |
+| Filter | `api-version` | Pick instances that serve the requested API version (Spring Framework 7 API versioning) | `configurations=api-version` |
+| Filter | Hint-based | Route by a hint header (`X-SC-LB-Hint`) matched to a `hint` in instance metadata | custom supplier built with `ServiceInstanceListSupplier.builder()...withHints()` |
+
+- ***Switch the whole gateway*** — one property in `application.yml`:
+
+```yaml
+spring:
+  cloud:
+    loadbalancer:
+      configurations: health-check   # or zone-preference, weighted, subset, ...
+```
+
+- ***Switch one service only*** — a `@LoadBalancerClient(name = "USER-SERVICE", configuration = UserLbConfig.class)`
+  whose config class is ***not*** component-scanned (otherwise it applies to every service); each service ID gets its own
+  child context on first use. Full mechanics and a custom-algorithm example:
+  [learning-architecture-design-pattern-microservice.md §18](https://github.com/himnay/learning/blob/main/learning-architecture-design-pattern-microservice.md#18-how-does-client-side-load-balancing-work-spring-cloud-loadbalancer).
+- ***Pick by problem*** — dead instances lingering → `health-check` + `Retry` filter; multi-zone → `zone-preference`;
+  mixed instance sizes or canary → `weighted` ([Q5](#qa-canary-release)); hundreds of instances → `subset`;
+  slow-instance avoidance → custom algorithm or a service mesh.
