@@ -38,7 +38,8 @@ whole picture (Eureka, gateway, Spring Boot Admin, run order).
 | Concern        | Dependency ([pom.xml](pom.xml))                                                                        |
 |----------------|--------------------------------------------------------------------------------------------------------|
 | Web            | `spring-boot-starter-webmvc` (Spring Boot 4.x, servlet stack)                                          |
-| Discovery      | `spring-cloud-starter-netflix-eureka-client` (Spring Cloud 2025.1.2)                                   |
+| Discovery      | `spring-cloud-starter-netflix-eureka-client` (Spring Cloud 2025.1.3)                                   |
+| Persistence    | `spring-boot-starter-data-jdbc`, `spring-boot-starter-flyway` + `flyway-database-postgresql`, `postgresql`, `spring-boot-docker-compose` (optional) |
 | Client-side LB | `spring-cloud-starter-loadbalancer`                                                                    |
 | Ops            | `spring-boot-starter-actuator`, `jolokia-support-springboot` 2.6.3 (version from `learning-bom` 3.1.0) |
 | Tracing        | `spring-boot-starter-opentelemetry` → OTLP to [../zipkin-server](../zipkin-server/README.md)           |
@@ -46,24 +47,28 @@ whole picture (Eureka, gateway, Spring Boot Admin, run order).
 | Scheduling     | `spring-boot-starter-quartz` (in-memory job store)                                                     |
 | API docs       | `springdoc-openapi-starter-webmvc-ui` → http://localhost:8081/swagger-ui.html                          |
 | Boilerplate    | Lombok (`@Slf4j` in the Quartz job)                                                                    |
-| Tests          | `spring-boot-starter-webmvc-test`, `spring-boot-starter-security-test`                                 |
+| Tests          | `spring-boot-starter-webmvc-test`, `spring-boot-starter-security-test`, `spring-boot-testcontainers` + Testcontainers Postgres |
 
 ### REST API
 
 | Method | Path              | Response                                                                          | Source                                                                                          |
 |--------|-------------------|-----------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
-| `GET`  | `/api/users`      | JSON array of all 3 users                                                         | [UserController.java](src/main/java/com/learning/discovery/user/controller/UserController.java) |
-| `GET`  | `/api/users/{id}` | single user, or ***`404`*** via `ResponseStatusException` ("User {id} not found") | same                                                                                            |
+| `GET`  | `/api/users`      | JSON array of all users (5 seeded by Flyway)                                      | [UserController.java](src/main/java/com/learning/discovery/user/controller/UserController.java) |
+| `GET`  | `/api/users/{id}` | single user, or ***`404`*** via `ResponseStatusException` ("User {id} not found"), rendered as `application/problem+json` by `ApiExceptionHandler` | same                                                                                            |
 
-- ***Data source:*** an immutable in-memory `List.of(...)` constant — no database, no writes.
+- ***Data source:*** Postgres through Spring Data JDBC — `UserRepository extends ListCrudRepository<User, Long>`,
+  called by `UserService`; table `users` created and seeded by Flyway (`db/migration/V1__create_users.sql`,
+  `V2__seed_users.sql`). Read-only API, no writes.
 - Model is a Java record [User.java](src/main/java/com/learning/discovery/user/model/User.java):
-  `User(Long id, String name, String email)`.
+  `@Table("users") User(@Id Long id, String name, String email)`.
 
 | id | name  | email             |
 |----|-------|-------------------|
 | 1  | Alice | alice@example.com |
 | 2  | Bob   | bob@example.com   |
 | 3  | Carol | carol@example.com |
+| 4  | Dave  | dave@example.com  |
+| 5  | Erin  | erin@example.com  |
 
 - Both endpoints ***require HTTP Basic*** (see [§4](#security)).
 - Entry point [UserServiceApplication.java](src/main/java/com/learning/discovery/user/UserServiceApplication.java) uses
@@ -130,8 +135,10 @@ mvn -pl user-service spring-boot:run -Dspring-boot.run.arguments=--server.port=8
 eureka:
   client:
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/
+      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
   instance:
+    lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
+    lease-expiration-duration-in-seconds: 30   # (default 90)
     prefer-ip-address: true
     metadata-map:
       "[user.name]": ${spring.security.user.name}
@@ -192,7 +199,7 @@ sequenceDiagram
     U->>E: register + heartbeat (Basic creds in defaultZone, metadata user.name/user.password)
     C->>U: GET /api/users (Authorization: Basic admin:admin)
     U->>U: BasicAuthenticationFilter -> authenticated -> AuditEvent AUTHENTICATION_SUCCESS
-    U-->>C: 200 [Alice, Bob, Carol]
+    U-->>C: 200 [Alice, Bob, Carol, Dave, Erin]
     C->>U: GET /api/users (no credentials)
     U-->>C: 401 WWW-Authenticate: Basic
     S->>E: fetch registry, read instance metadata creds
@@ -267,7 +274,7 @@ curl -u admin:admin -X POST http://localhost:8081/actuator/loggers/com.learning 
 ### File logging
 
 - `logging.file.name: logs/${spring.application.name}.log` → `logs/user-service.log`, ***relative to the working
-  directory*** (the module dir under `spring-boot:run`).
+  directory*** (the repo root, also under `spring-boot:run`: `<workingDirectory>` in [pom.xml](pom.xml)).
 - Setting it is what makes `/actuator/logfile` (SBA Logfile view) appear.
 
 ### Annotated application.yml (excerpt)
@@ -290,7 +297,7 @@ server:
 eureka:
   client:
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/
+      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
   instance:
     prefer-ip-address: true             # register IP, not hostname
     metadata-map:                       # SBA reads these to call /actuator
@@ -331,26 +338,32 @@ mvn -pl user-service verify   # UserControllerTest + UserServiceApplicationIT (*
 `@WebMvcTest` slice
 
 - `@WebMvcTest(UserController.class)` + `@Import(SecurityConfig.class)` so the real filter chain applies; class-level
-  `@WithMockUser`.
+  `@WithMockUser`; `UserService` is a `@MockitoBean` stubbed with 3 users (no database).
 
 | Test                                   | Checks                                            |
 |----------------------------------------|---------------------------------------------------|
 | `getUsersReturnsSeedList`              | `GET /api/users` → 200, 3 items, first is `Alice` |
 | `getUserByIdReturnsMatch`              | `GET /api/users/2` → `Bob`, `bob@example.com`     |
-| `getUserByUnknownIdReturns404`         | `GET /api/users/999` → 404                        |
+| `getUserByUnknownIdReturns404ProblemDetail` | `GET /api/users/999` → 404 `application/problem+json`, `detail` "User 999 not found" |
+| `nonNumericIdReturns400ProblemDetail`  | `GET /api/users/abc` → 400 `application/problem+json` |
 | `getUsersWithoutCredentialsReturns401` | `@WithAnonymousUser` → 401                        |
 
 ### [UserServiceApplicationIT.java](src/test/java/com/learning/discovery/user/UserServiceApplicationIT.java) — full stack, random port
 
-- `@SpringBootTest(RANDOM_PORT)` with two `RestTestClient`s: anonymous and one with `setBasicAuth("admin","admin")`.
+- `@SpringBootTest(RANDOM_PORT)` + Testcontainers `postgres:18` (`@ServiceConnection`, Docker required) with two
+  `RestTestClient`s: anonymous and one with `setBasicAuth("admin","admin")`.
 
 | Test                                           | Checks                                                                                                      |
 |------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
-| `fullStackReturnsUsersOverHttp`                | authed `GET /api/users` → 2xx, 3 items                                                                      |
+| `fullStackReturnsFlywaySeededUsersOverHttp`    | authed `GET /api/users` → 2xx, 5 items                                                                      |
+| `unknownUserReturns404`                        | authed `GET /api/users/999` → 404                                                                           |
+| `readinessIncludesDb`                          | anonymous `GET /actuator/health/readiness` → `components.db.status: UP`                                     |
 | `healthEndpointReportsUp`                      | anonymous `GET /actuator/health` → `status: UP`                                                             |
 | `sbaEndpointsAreExposed`                       | authed `GET /actuator` has `_links` for `sbom`, `jolokia`, `httpexchanges`, `auditevents`                   |
 | `apiWithoutCredentialsReturns401`              | anonymous `GET /api/users` → 401                                                                            |
 | `sensitiveActuatorEndpointRequiresCredentials` | anonymous `/actuator/quartz` → 401; authed `/actuator/quartz/jobs/demo/heartbeatJob` → `name: heartbeatJob` |
+| `openApiSpecIsPublicAndDeclaresBasicAuth`      | anonymous `/v3/api-docs` → `basicAuth` scheme, server URL `/`, documented 404 on `/api/users/{id}`          |
+| `swaggerUiIsPublic`                            | anonymous `/swagger-ui.html` → 2xx (redirect followed)                                                      |
 
 <a id="gotchas"></a>
 

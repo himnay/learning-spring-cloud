@@ -19,7 +19,7 @@
     - 9.6 🔥🔥 [Orders store the product as free text (`'Keyboard'`) with no id and no price — redesign how `order-service` references `product-service` data](#qa-order-product-reference)
 
 Part of the [learning-spring-cloud](../README.md) demo: a small Spring MVC
-service that serves a fixed product catalogue, registers with Eureka, sits behind
+service that serves a product catalogue from its own Postgres, registers with Eureka, sits behind
 `gateway-service`, and exposes enough actuator endpoints to light up almost
 every Spring Boot Admin (SBA) view. Shared setup that applies to every module (parent/BOM chain, run order, the full SBA
 view matrix) lives in the
@@ -33,11 +33,12 @@ view matrix) lives in the
   through the gateway route `/api/products/**` → `lb://PRODUCT-SERVICE`
   (see [root §2](../README.md#how-the-gateway-finds-services-via-eureka)).
 - ***Port*** — `8083` (`server.port` in [application.yml](src/main/resources/application.yml)).
-- ***Data source*** — ***no database***: three products are hard-coded in an immutable `List.of(...)`
-  inside [ProductController.java](src/main/java/com/learning/discovery/product/controller/ProductController.java).
-  Nothing is ever written.
+- ***Data source*** — ***Postgres*** (host port 5436, started by `spring-boot-docker-compose` from
+  [docker-compose.yaml](docker-compose.yaml)) through Spring Data JDBC: `ProductRepository extends
+  ListCrudRepository<Product, Long>`; table `products` created and seeded by Flyway (`db/migration/V1__create_products.sql`,
+  `V2__seed_products.sql`). Nothing is ever written by the API.
 - ***Model*** — a Java `record` [Product.java](src/main/java/com/learning/discovery/product/model/Product.java):
-  `Product(Long id, String name, BigDecimal price)`.
+  `@Table("products") Product(@Id Long id, String name, BigDecimal price)`.
 
 **Stack (as of 2026)** — versions come from the parent chain in [../pom.xml](../pom.xml); the banner prints Spring Cloud
 `2025.1.2`, and the root README links Spring Boot `4.1.x` sources.
@@ -49,19 +50,21 @@ view matrix) lives in the
 | `spring-boot-starter-opentelemetry`                                           | Traces over OTLP to [../zipkin-server](../zipkin-server/README.md)                                                           |
 | `spring-cloud-starter-netflix-eureka-client`                                  | Registration with `eureka-server`; also brings Spring Cloud Context (`restart`, `refresh`, `env` POST)                       |
 | `spring-cloud-starter-loadbalancer`                                           | On the classpath for consistency with the other clients; ***product-service makes no outbound calls***, so it is unused here |
+| `spring-boot-starter-data-jdbc`, `spring-boot-starter-flyway`, `flyway-database-postgresql`, `postgresql`, `spring-boot-docker-compose` (optional) | Postgres catalogue: repository, migrations + seed, local DB from Docker Compose |
 | `spring-boot-starter-security`                                                | HTTP Basic, one in-memory user                                                                                               |
 | `spring-boot-starter-quartz`                                                  | Demo `HeartbeatJob` → `/actuator/quartz`                                                                                     |
 | `org.jolokia:jolokia-support-springboot` **2.6.3**                            | `/actuator/jolokia` → SBA JMX view (version from `learning-bom` 3.1.0, no `<version>` in the pom)                            |
 | `springdoc-openapi-starter-webmvc-ui`                                         | Swagger UI + `/v3/api-docs`                                                                                                  |
 | `lombok` (optional)                                                           | `@Slf4j` on the Quartz job                                                                                                   |
 | `spring-boot-starter-webmvc-test`, `spring-boot-starter-security-test` (test) | `@WebMvcTest`, `MockMvc`, `RestTestClient`, `@WithMockUser`                                                                  |
+| `spring-boot-testcontainers`, `testcontainers-junit-jupiter`, `testcontainers-postgresql` (test) | throwaway Postgres for the IT                                                             |
 
 **REST API** (all `GET`, all require Basic auth):
 
 | Method + path            | Returns                      | Errors                                                                                      |
 |--------------------------|------------------------------|---------------------------------------------------------------------------------------------|
-| `GET /api/products`      | JSON array of all 3 products | `401` without credentials                                                                   |
-| `GET /api/products/{id}` | single product               | `404` via `ResponseStatusException` (`"Product {id} not found"`), `401` without credentials |
+| `GET /api/products`      | JSON array of all products (6 seeded) | `401` without credentials                                                          |
+| `GET /api/products/{id}` | single product               | `404` via `ResponseStatusException` (`"Product {id} not found"`, `application/problem+json`), `401` without credentials |
 
 Seed data:
 
@@ -70,6 +73,9 @@ Seed data:
 | 201 | Keyboard | 49.99  |
 | 202 | Monitor  | 199.99 |
 | 203 | Mouse    | 19.99  |
+| 204 | Laptop   | 999.00 |
+| 205 | Headset  | 79.50  |
+| 206 | Webcam   | 59.90  |
 
 - ***Swagger UI*** — http://localhost:8083/swagger-ui.html (spec at `/v3/api-docs`); both are public, but "Try it out"
   calls to `/api/**` still need credentials.
@@ -135,8 +141,10 @@ SERVER_PORT=8093 mvn -pl product-service spring-boot:run
 eureka:
   client:
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/
+      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
   instance:
+    lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
+    lease-expiration-duration-in-seconds: 30   # (default 90)
     prefer-ip-address: true
     metadata-map:
       user.name: ${spring.security.user.name}
@@ -215,7 +223,7 @@ sequenceDiagram
     Caller->>Sec: GET /api/products, Authorization: Basic admin:admin
     Sec->>Audit: AUTHENTICATION_SUCCESS
     Sec->>Ctl: authenticated request
-    Ctl-->>Caller: 200 [3 products]
+    Ctl-->>Caller: 200 [6 products]
 
     SBA->>Eureka: fetch registry (PRODUCT-SERVICE + metadata user.name/user.password)
     SBA->>Act: GET /actuator/health (public, no auth needed)
@@ -236,7 +244,7 @@ the rest need Basic auth. The cross-module matrix is in [root §10](../README.md
 | Endpoint        | SBA view                     | Backing config in this module                                                                                                                                                                                 |
 |-----------------|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `health`        | Details → Health             | `management.endpoint.health.show-details: always`                                                                                                                                                             |
-| `info`          | Details → Info               | default (no `info.*` properties set)                                                                                                                                                                          |
+| `info`          | Details → Info               | `info.app.*` + `management.info.*.enabled` (see below)                                                                                                                                                                        |
 | `heapdump`      | Heap Dump                    | `management.endpoint.heapdump.access: unrestricted` (Boot 3.5+ defaults it to `none`, as of 2026)                                                                                                             |
 | `logfile`       | Logfile                      | `logging.file.name: logs/${spring.application.name}.log` — no file, no endpoint                                                                                                                               |
 | `env`           | Environment                  | exposure only; `management.endpoint.env.post.enabled: true` enables the SBA "Update" form (`POST /actuator/env`, Spring Cloud Context)                                                                        |
@@ -293,8 +301,9 @@ curl -u admin:admin -X POST http://localhost:8083/actuator/shutdown   # stops th
 
 **File logging**
 
-- ***`logging.file.name: logs/product-service.log`*** — relative to the working directory, so
-  `mvn -pl product-service spring-boot:run` writes `product-service/logs/product-service.log`. Its only purpose is to
+- ***`logging.file.name: logs/product-service.log`*** — relative to the working directory, which is the repo root
+  (IDE run configs, and `spring-boot:run` via `<workingDirectory>` in [pom.xml](pom.xml)), so it writes
+  `logs/product-service.log`. Its only purpose is to
   enable `/actuator/logfile` (SBA "Logfile"); console logging is unchanged.
 
 **Annotated [application.yml](src/main/resources/application.yml)**
@@ -317,7 +326,7 @@ server:
 eureka:
   client:
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/
+      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
   instance:
     prefer-ip-address: true                     # register IP, not hostname
     metadata-map:
@@ -356,25 +365,31 @@ see [root §6](../README.md#tests)).
 
 **[ProductControllerTest.java](src/test/java/com/learning/discovery/product/controller/ProductControllerTest.java)** —
 `@WebMvcTest(ProductController.class)` + `@Import(SecurityConfig.class)` + class-level `@WithMockUser`, using `MockMvc`
-(web slice only, no server).
+(web slice only, no server); `ProductService` is a `@MockitoBean` stubbed with 3 products.
 
 | Test                                      | Checks                                                                     |
 |-------------------------------------------|----------------------------------------------------------------------------|
 | `getProductsReturnsSeedList`              | `GET /api/products` → `200`, 3 items, first is `Keyboard`                  |
 | `getProductByIdReturnsMatch`              | `GET /api/products/202` → `200`, name `Monitor`, price `199.99`            |
 | `getProductsWithoutCredentialsReturns401` | `@WithAnonymousUser` → `401` (proves the real `SecurityConfig` is applied) |
-| `getProductByUnknownIdReturns404`         | `GET /api/products/999` → `404`                                            |
+| `getProductByUnknownIdReturns404ProblemDetail` | `GET /api/products/999` → `404` `application/problem+json`            |
+| `nonNumericIdReturns400ProblemDetail`     | `GET /api/products/abc` → `400` `application/problem+json`                 |
 
 **[ProductServiceApplicationIT.java](src/test/java/com/learning/discovery/product/ProductServiceApplicationIT.java)** —
-`@SpringBootTest(webEnvironment = RANDOM_PORT)`, real embedded Tomcat, `RestTestClient` bound to
-`http://localhost:<port>`.
+`@SpringBootTest(webEnvironment = RANDOM_PORT)`, real embedded Tomcat, Testcontainers Postgres (`@ServiceConnection`,
+Docker required), `RestTestClient` bound to `http://localhost:<port>`.
 
 | Test                                        | Checks                                                                                                |
 |---------------------------------------------|-------------------------------------------------------------------------------------------------------|
 | `apiWithoutCredentialsReturns401`           | `GET /api/products` without auth → `401`                                                              |
-| `fullStackReturnsProductsOverHttp`          | Basic `admin`/`admin` → `2xx`, 3 items                                                                |
+| `fullStackReturnsFlywaySeededProductsOverHttp` | Basic `admin`/`admin` → `2xx`, 6 items                                                             |
+| `productByIdKeepsNumericPriceScale`         | `GET /api/products/201` → `Keyboard`, price `49.99`                                                   |
+| `unknownProductReturns404`                  | `GET /api/products/999` → `404`                                                                       |
+| `readinessIncludesDatabase`                 | `GET /actuator/health/readiness` → `UP`                                                               |
 | `healthEndpointIsPublicAndReportsUp`        | `GET /actuator/health` without auth → `2xx`, `status = UP`                                            |
 | `secureActuatorEndpointsRequireCredentials` | `GET /actuator/quartz` → `401` without auth, `200` with it (also proves the Quartz endpoint is wired) |
+| `openApiSpecIsPublicAndDeclaresBasicAuth`   | `/v3/api-docs` → `basicAuth` scheme, server URL `/`, documented 404 on `/api/products/{id}`           |
+| `swaggerUiIsPublic`                         | `/swagger-ui.html` → `2xx`                                                                            |
 
 <a id="gotchas"></a>
 
@@ -403,8 +418,8 @@ see [root §6](../README.md#tests)).
 - ***`spring-cloud-starter-loadbalancer` is unused here*** — the module never calls another service; only
   `order-service` does.
 - ***Shutdown deregisters cleanly, a kill does not*** — `POST /actuator/shutdown` closes the context and the Eureka
-  client cancels its lease; a `kill -9` leaves `PRODUCT-SERVICE` in the registry until the lease expires (~90s by
-  default), and the gateway may route to a dead instance meanwhile.
+  client cancels its lease; a `kill -9` leaves `PRODUCT-SERVICE` in the registry until the lease expires (~60–90 s
+  here: 2 × the 30 s lease plus up to one 30 s eviction sweep), and the gateway may route to a dead instance meanwhile.
 
 <a id="qa"></a>
 

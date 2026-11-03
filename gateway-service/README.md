@@ -40,7 +40,7 @@ README; this file covers only what `gateway-service` itself implements.
 
 | Concern         | Dependency ([pom.xml](pom.xml))                                                                                                                   | Version source                                                             |
 |-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|
-| Gateway         | `spring-cloud-starter-gateway-server-webflux`                                                                                                     | Spring Cloud 2025.1.2 (via root [pom.xml](../pom.xml) / `super-pom` 1.2.1) |
+| Gateway         | `spring-cloud-starter-gateway-server-webflux`                                                                                                     | Spring Cloud 2025.1.3 (via root [pom.xml](../pom.xml) / `super-pom` 1.2.1) |
 | Discovery       | `spring-cloud-starter-netflix-eureka-client`                                                                                                      | Spring Cloud BOM                                                           |
 | Ops             | `spring-boot-starter-actuator`                                                                                                                    | Spring Boot 4.1                                                            |
 | Tracing         | `spring-boot-starter-opentelemetry` → OTLP to [../zipkin-server](../zipkin-server/README.md)                                                      | Spring Boot 4.1                                                            |
@@ -58,6 +58,7 @@ README; this file covers only what `gateway-service` itself implements.
 | `user-service`    | `Path=/api/users/**`    | `lb://USER-SERVICE`    | none (path forwarded unchanged) |
 | `order-service`   | `Path=/api/orders/**`   | `lb://ORDER-SERVICE`   | none                            |
 | `product-service` | `Path=/api/products/**` | `lb://PRODUCT-SERVICE` | none                            |
+| `user-service-api-docs` / `order-service-api-docs` / `product-service-api-docs` | `Path=/api-docs/{service}` | `lb://USER-SERVICE` / `lb://ORDER-SERVICE` / `lb://PRODUCT-SERVICE` | `SetPath=/v3/api-docs` (specs for the aggregated Swagger UI, [Q2](#qa-route-vs-handler-precedence)) |
 
 - ***No `StripPrefix` / `RewritePath`*** — `/api/users/1` arrives downstream as `/api/users/1`, matching the backends'
   own controller mappings.
@@ -175,7 +176,8 @@ Implemented in [SecurityConfig.java](src/main/java/com/learning/discovery/gatewa
   `HttpSecurity` don't apply; the bean takes `ServerHttpSecurity`, the auto-configured `ReactiveUserDetailsService`
   (built from `spring.security.user.*`) and the `ApplicationEventPublisher`.
 - ***HTTP Basic only*** — no form login, no sessions to speak of; every request carries `Authorization: Basic ...`.
-- ***Permitted without auth*** — `/actuator/health/**`, `/actuator/info`, `/swagger-ui/**`, `/v3/api-docs/**`, `/error`.
+- ***Permitted without auth*** — `app.security.public-paths`: `/actuator/health/**`, `/actuator/info`, `/swagger-ui.html`,
+  `/swagger-ui/**`, `/webjars/swagger-ui/**`, `/v3/api-docs/**`, `/api-docs/**`, `/error`.
   Everything else (`anyExchange().authenticated()`), including all `/api/**` routes and every other actuator endpoint,
   needs credentials.
 - ***CSRF disabled*** — `ServerHttpSecurity.CsrfSpec::disable`: stateless API proxy with no browser session, and SBA's
@@ -350,8 +352,10 @@ server:
 eureka:
   client:
     service-url:                     # Eureka server is Basic-secured too
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/
+      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
   instance:
+    lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
+    lease-expiration-duration-in-seconds: 30   # (default 90)
     prefer-ip-address: true          # register IP, not hostname
     metadata-map:                    # SBA reads these to poll the secured actuator
       user.name: ${spring.security.user.name}
@@ -393,6 +397,7 @@ management:
 | `protectedPathWithoutCredentialsIsUnauthorized`   | `GET /actuator/env` with no auth → 401                                                                                                                                   |
 | `protectedPathWithCredentialsIsAllowedAndAudited` | `GET /actuator/env` as `admin:admin` → 200; then `/actuator/auditevents?type=AUTHENTICATION_SUCCESS` returns `$.events[0].principal == "admin"` (auditing wrapper works) |
 | `quartzHeartbeatJobIsRegistered`                  | `GET /actuator/quartz/jobs/demo/heartbeatJob` → 200, `$.name == "heartbeatJob"`                                                                                          |
+| `aggregatedSwaggerUiListsTheServiceSpecs`         | `/swagger-ui.html` → 3xx; `/v3/api-docs/swagger-config` lists 3 `urls`, `order-service` → `/api-docs/order-service`                                                       |
 
 - ***Not covered*** — actual proxying through `lb://` routes (would need registered backends or a stubbed
   `ServiceInstanceListSupplier`).

@@ -10,21 +10,22 @@
 6. ⏱️ [Quartz demo job](#quartz)
 7. 📝 [Logging to file](#logging)
 8. ⚙️ [Configuration reference](#configuration)
-9. 🧪 [Tests](#tests)
-10. 🛠️ [Gotchas and troubleshooting](#gotchas)
-11. ❓ [Q&A](#qa)
-    - 11.1 [Does Spring Boot Admin poll, or do the clients push?](#qa-sba-poll-or-push)
-    - 11.2 [If we don't use Eureka, do we have to list each client in SBA?](#qa-without-eureka)
-    - 11.3 [So without Eureka it's a push from the client?](#qa-push-without-eureka)
-    - 11.4 [Does Eureka save SBA from calling every instance, by replacing those calls with one call to Eureka?](#qa-eureka-saves-calls)
-    - 11.5 [Can we avoid `spring-boot-admin-starter-client` in every service and rely on Eureka alone?](#qa-eureka-only)
-    - 11.6 [What are the `AuditEventRepository` and `HttpExchangeRepository` beans in `ActuatorConfig` for?](#qa-actuator-repositories)
-    - 11.7 [Can we use Basic auth to log in to the SBA UI but OAuth2 towards the backend services?](#qa-basic-ui-oauth-backend)
-    - 11.8 🔥 [`SecurityConfig` exempts `/instances/**` and `/actuator/**` from CSRF — what does a malicious page do with a logged-in SBA session, and how narrow should the exemption be?](#qa-csrf-exemption-scope)
-    - 11.9 🔥 [Someone clicks Heap Dump on a production `order-service` in SBA — what happens to that instance, its callers and the data?](#qa-heapdump-click-production)
-    - 11.10 🔥 [Why is SBA a weak primary alerting system, even after you add a notifier?](#qa-sba-as-alerting)
-    - 11.11 🔥🔥 [Run admin-server as two instances behind a load balancer — what breaks with this module's in-memory state, and is HA worth it at all?](#qa-sba-high-availability)
-    - 11.12 🔥🔥 [SBA suddenly shows the three Postgres-backed services OFFLINE, while Eureka shows them UP and the gateway serves traffic — debug it](#qa-mass-offline-debug)
+9. 🔄 [Polling frequency](#polling)
+10. 🧪 [Tests](#tests)
+11. 🛠️ [Gotchas and troubleshooting](#gotchas)
+12. ❓ [Q&A](#qa)
+    - 12.1 [Does Spring Boot Admin poll, or do the clients push?](#qa-sba-poll-or-push)
+    - 12.2 [If we don't use Eureka, do we have to list each client in SBA?](#qa-without-eureka)
+    - 12.3 [So without Eureka it's a push from the client?](#qa-push-without-eureka)
+    - 12.4 [Does Eureka save SBA from calling every instance, by replacing those calls with one call to Eureka?](#qa-eureka-saves-calls)
+    - 12.5 [Can we avoid `spring-boot-admin-starter-client` in every service and rely on Eureka alone?](#qa-eureka-only)
+    - 12.6 [What are the `AuditEventRepository` and `HttpExchangeRepository` beans in `ActuatorConfig` for?](#qa-actuator-repositories)
+    - 12.7 [Can we use Basic auth to log in to the SBA UI but OAuth2 towards the backend services?](#qa-basic-ui-oauth-backend)
+    - 12.8 🔥 [`SecurityConfig` exempts `/instances/**` and `/actuator/**` from CSRF — what does a malicious page do with a logged-in SBA session, and how narrow should the exemption be?](#qa-csrf-exemption-scope)
+    - 12.9 🔥 [Someone clicks Heap Dump on a production `order-service` in SBA — what happens to that instance, its callers and the data?](#qa-heapdump-click-production)
+    - 12.10 🔥 [Why is SBA a weak primary alerting system, even after you add a notifier?](#qa-sba-as-alerting)
+    - 12.11 🔥🔥 [Run admin-server as two instances behind a load balancer — what breaks with this module's in-memory state, and is HA worth it at all?](#qa-sba-high-availability)
+    - 12.12 🔥🔥 [SBA suddenly shows the three Postgres-backed services OFFLINE, while Eureka shows them UP and the gateway serves traffic — debug it](#qa-mass-offline-debug)
 
 Spring Boot Admin (SBA) dashboard for the Eureka demo. Back to the project
 overview: [../README.md](../README.md).
@@ -44,7 +45,7 @@ overview: [../README.md](../README.md).
   Spring Cloud `DiscoveryClient` to list every service in the registry and turns
   each one into an SBA *instance*. The services don't need the SBA client library.
 - ***It registers itself too.*** admin-server is a Eureka client (`eureka.client.service-url.defaultZone` →
-  `localhost:8761`), so it appears in
+  the registry nodes `localhost:8761`, `127.0.0.1:8762`, `127.0.0.2:8763`), so it appears in
   its own dashboard as `ADMIN-SERVER`, next to `EUREKA-SERVER`, `USER-SERVICE`,
   `ORDER-SERVICE`, `PRODUCT-SERVICE` and `GATEWAY-SERVICE`.
 - Entry point: [AdminServerApplication.java](src/main/java/com/learning/discovery/admin/AdminServerApplication.java),
@@ -67,7 +68,7 @@ Dependencies in [pom.xml](pom.xml):
 | `spring-boot-starter-actuator`                                                               | admin-server's own actuator endpoints                                                                           |
 | `spring-boot-starter-security`                                                               | login for the UI and actuator                                                                                   |
 | `spring-boot-starter-quartz`                                                                 | demo job behind the SBA "Quartz" view                                                                           |
-| `spring-boot-starter-test`, `spring-boot-webtestclient`, `spring-boot-starter-security-test` | integration test ([§9](#tests))                                                                                 |
+| `spring-boot-starter-test`, `spring-boot-webtestclient`, `spring-boot-starter-security-test` | integration test ([§10](#tests))                                                                                 |
 
 - ***No Jolokia***: the pom comments it out on purpose. `jolokia-support-springboot`
   needs a servlet container, and this server is WebFlux only.
@@ -374,8 +375,10 @@ server:
 eureka:
   client:
     service-url: # the registry itself is Basic-protected
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/
+      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
   instance:
+    lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
+    lease-expiration-duration-in-seconds: 30   # (default 90)
     prefer-ip-address: true                # register by IP, not hostname
     metadata-map: # SBA discovers itself, so it needs its own credentials
       user.name: ${spring.security.user.name}
@@ -408,9 +411,94 @@ management:
 | `ACTUATOR_USER`      | `admin` | UI login, actuator Basic, Eureka URL, metadata, instance-auth default |
 | `ACTUATOR_PASSWORD`  | `admin` | same as above                                                         |
 
+<a id="polling"></a>
+
+## <span style="color:hsl(186,80%,50%)">9. 🔄 Polling frequency</span>
+
+- ***Yes, it's configurable, but three separate loops refresh what you see***, each with its own setting. Property
+  names and defaults come from the SBA 4.1.3 jar metadata (as of 2026). This module overrides none of them; see
+  [application.yml](src/main/resources/application.yml).
+
+```text
+browser ──(1) ui.poll-timer.*, only while a detail view is open──► admin-server ──proxy──► instance /actuator/metrics…
+browser ◄──── status changes pushed over SSE (no timer) ─────────── admin-server
+                                                                   admin-server ──(2) monitor.*-interval──► instance /actuator/health, /info
+                                                                   admin-server ◄──(3) Eureka registry fetch, 30 s── eureka-server
+```
+
+### <span style="color:hsl(339,80%,58%)">9.1 Browser → admin-server: detail views</span>
+
+| Property (milliseconds)                      | Default | View          |
+|----------------------------------------------|---------|---------------|
+| `spring.boot.admin.ui.poll-timer.memory`     | 2500    | Memory        |
+| `spring.boot.admin.ui.poll-timer.threads`    | 2500    | Threads       |
+| `spring.boot.admin.ui.poll-timer.gc`         | 2500    | GC            |
+| `spring.boot.admin.ui.poll-timer.process`    | 2500    | Process       |
+| `spring.boot.admin.ui.poll-timer.cache`      | 2500    | Caches        |
+| `spring.boot.admin.ui.poll-timer.datasource` | 2500    | Datasource    |
+| `spring.boot.admin.ui.poll-timer.logfile`    | 1000    | Logfile       |
+| `spring.boot.admin.ui.poll-timer.threaddump` | 1000    | Thread dump   |
+
+- ***Runs only while the view is open in a browser.*** Each tick goes through admin-server's
+  `/instances/{id}/actuator/**` proxy, so it's one actuator call on that instance per open tab.
+- ***The application list and status badges have no timer.*** admin-server pushes status changes to the browser over
+  server-sent events, so what they show is only as fresh as loop 2.
+
+### <span style="color:hsl(116,80%,58%)">9.2 admin-server → each instance: status and info</span>
+
+| Property                                       | Default | Meaning                                                                      |
+|------------------------------------------------|---------|------------------------------------------------------------------------------|
+| `spring.boot.admin.monitor.status-interval`    | 10 s    | How often `/actuator/health` is called; must be over 1 s                      |
+| `spring.boot.admin.monitor.status-lifetime`    | 10 s    | Status isn't refreshed while the last one is unexpired; keep it = the interval |
+| `spring.boot.admin.monitor.status-max-backoff` | 60 s    | Cap on the exponential back-off for an instance whose checks keep failing     |
+| `spring.boot.admin.monitor.info-interval`      | 1 min   | How often `/actuator/info` is called                                         |
+| `spring.boot.admin.monitor.info-lifetime`      | 1 min   | Same as status-lifetime, for info                                            |
+| `spring.boot.admin.monitor.info-max-backoff`   | 10 min  | Back-off cap for info                                                        |
+| `spring.boot.admin.monitor.default-timeout`    | 10 s    | Per-request timeout; `monitor.timeout.<endpoint>` overrides one endpoint      |
+| `spring.boot.admin.monitor.default-retries`    | 0       | Retries per request; `monitor.retries.<endpoint>` overrides one endpoint      |
+
+- ***Runs all the time, whether or not anyone is looking at the UI.*** Load is one health call per instance per
+  interval ([Q4](#qa-eureka-saves-calls)).
+- ***Lifetime longer than interval makes the lifetime the real interval***, because polls inside it are skipped.
+
+### <span style="color:hsl(254,80%,58%)">9.3 Discovery: new and removed instances</span>
+
+- ***Not an SBA property.*** admin-server re-reads its instance list each time its Eureka client fetches the registry
+  ([Q1](#qa-sba-poll-or-push)), so the setting is `eureka.client.registry-fetch-interval-seconds` (default 30) in this
+  module's `application.yml`.
+- A new instance can take longer than 30 s to show, because eureka-server's own response cache adds to the fetch delay.
+
+### <span style="color:hsl(31,80%,58%)">9.4 Tuning it</span>
+
+```yaml
+spring:
+  boot:
+    admin:
+      monitor:
+        status-interval: 30s     # fewer health calls to every instance
+        status-lifetime: 30s
+        timeout:
+          health: 3s             # fail fast instead of the 10 s default
+      ui:
+        poll-timer:
+          memory: 5000           # slower detail views
+          threads: 5000
+```
+
+| Change                       | You gain                                                   | You pay                                                                                        |
+|------------------------------|------------------------------------------------------------|------------------------------------------------------------------------------------------------|
+| Longer `status-interval`     | Fewer `/actuator/health` calls, which run every indicator (`db`, `ordersCache`…) | DOWN/OFFLINE shows, and notifies, later ([Q10](#qa-sba-as-alerting))                     |
+| Shorter `status-interval`    | Faster detection                                           | N instances ÷ interval health calls; slow indicators can pile up ([Q12](#qa-mass-offline-debug)) |
+| Shorter `timeout.health`     | Hung instances go OFFLINE sooner                           | A slow-but-alive DB indicator flips instances to OFFLINE                                        |
+| Longer `ui.poll-timer.*`     | Less load from open tabs                                   | Charts update less smoothly; cost only exists while someone has a view open                     |
+| Shorter fetch interval       | New instances appear sooner                                | More registry fetches from eureka-server (deltas, cheap)                                        |
+
+- ***Worst-case detection with the defaults ≈ interval + timeout = 20 s***: the instance hangs right after a check,
+  the next check starts 10 s later, and it gives up after another 10 s.
+
 <a id="tests"></a>
 
-## <span style="color:hsl(311,80%,58%)">9. 🧪 Tests</span>
+## <span style="color:hsl(311,80%,58%)">10. 🧪 Tests</span>
 
 [AdminServerApplicationIT.java](src/test/java/com/learning/discovery/admin/AdminServerApplicationIT.java):
 `@SpringBootTest(webEnvironment = RANDOM_PORT)` + `@AutoConfigureWebTestClient`
@@ -440,7 +528,7 @@ mvn -pl admin-server verify -Dit.test=AdminServerApplicationIT
 
 <a id="gotchas"></a>
 
-## <span style="color:hsl(46,80%,58%)">10. 🛠️ Gotchas and troubleshooting</span>
+## <span style="color:hsl(46,80%,58%)">11. 🛠️ Gotchas and troubleshooting</span>
 
 | Symptom                                               | Likely cause                                                                      | Fix                                                                                                                                                                                      |
 |-------------------------------------------------------|-----------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -452,12 +540,12 @@ mvn -pl admin-server verify -Dit.test=AdminServerApplicationIT
 | curl to the API gets `401` instead of a redirect      | expected: non-HTML requests get the Basic challenge                               | `curl -u admin:admin http://localhost:8084/applications`                                                                                                                                 |
 | Logfile view says not found                           | no `logging.file.name`, or the file was deleted                                   | keep the property; the file is recreated on the next log line                                                                                                                            |
 | SBOM view empty                                       | app started without a Maven build that ran CycloneDX                              | `mvn -pl admin-server package` once                                                                                                                                                      |
-| Restarted eureka-server, instances vanish             | registry is in-memory; clients re-register on their next heartbeat (~30s)         | ***restart order: eureka-server first***, then the services, then admin-server; or just wait                                                                                             |
+| Restarted eureka-server, instances vanish             | registry is in-memory; clients re-register on their next heartbeat (~10s)         | ***restart order: eureka-server first***, then the services, then admin-server; or just wait                                                                                             |
 | "Restart" on admin-server itself drops the UI session | the context restarts, and so does the in-memory session store                     | log in again                                                                                                                                                                             |
 
 <a id="qa"></a>
 
-## <span style="color:hsl(0,80%,58%)">11. ❓ Q&A</span>
+## <span style="color:hsl(0,80%,58%)">12. ❓ Q&A</span>
 
 <a id="qa-sba-poll-or-push"></a>
 
@@ -627,7 +715,7 @@ SBA client vs Eureka only:
 | Extra dependency in every service       | yes                                             | **no**                                                                           |
 | Services need SBA's URL and credentials | yes                                             | **no**                                                                           |
 | New instance appears in SBA             | ≤ 10 s                                          | ≤ ~30–40 s (SBA's registry refresh + Eureka cache)                               |
-| Shutdown removal                        | immediate DELETE (if auto-deregistration is on) | immediate on clean shutdown (Eureka cancel), else after lease expiry (30 s here) |
+| Shutdown removal                        | immediate DELETE (if auto-deregistration is on) | immediate on clean shutdown (Eureka cancel), else after lease expiry (~60–90 s here) |
 | Works without a registry                | yes                                             | no                                                                               |
 | Non-Spring apps                         | possible (`POST /instances`)                    | only if they register with Eureka and expose actuator-style endpoints            |
 
@@ -780,8 +868,8 @@ and the data?**
 - ***Knock-on effects of the pause***:
   - ***Requests*** — Tomcat threads freeze. The gateway and `order-service`'s callers see latency spikes, or timeouts
     if the pause is longer than their read timeout.
-  - ***Registry*** — no heartbeats go out (one every 10 s here). If the pause goes past the 30 s lease, the instance
-    can be evicted and then registers again afterwards (timeline in
+  - ***Registry*** — no heartbeats go out (one every 10 s here). If the pause outlasts the lease (30 s configured, ~60 s
+    effective), the instance can be evicted and then registers again afterwards (timeline in
     [eureka-server Q2](../eureka-server/README.md#qa-crash-eviction-timeline)).
   - ***SBA itself*** — its own health polls time out, so the instance flips to OFFLINE. Any notifier would page
     someone for an outage SBA caused.

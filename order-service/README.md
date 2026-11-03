@@ -21,8 +21,8 @@
 
 The `order-service` module of the Eureka discovery demo. It is the "kitchen sink"
 service: on top of the plain Eureka-client role shared with `user-service` and
-`product-service`, it is the only module with a real database (Postgres via
-Docker Compose), a cache, a scheduler, JDBC-backed HTTP sessions and a
+`product-service`, it has its own Postgres (via Docker Compose, like those two) and is
+the only module with a cache, a scheduler, JDBC-backed HTTP sessions and a
 service-to-service call. Repo-wide context (module list, run order, parent/BOM
 chain, SBA feature matrix) lives in the root [../README.md](../README.md); this
 file only covers what is specific to this module.
@@ -61,7 +61,7 @@ require Basic auth:**
 | Method + path                    | Returns                         | Backed by                                               | Notes                                                                                |
 |----------------------------------|---------------------------------|---------------------------------------------------------|--------------------------------------------------------------------------------------|
 | `GET /api/orders`                | `List<Order>`                   | `OrderService.findAll()` → `OrderRepository.findAll()`  | ***Always hits Postgres*** — not cached                                              |
-| `GET /api/orders/{id}`           | `Order`                         | `OrderService.findById(id)` (`@Cacheable("orders")`)    | Unknown id → `ResponseStatusException(404, "Order {id} not found")`                  |
+| `GET /api/orders/{id}`           | `Order`                         | `OrderService.findById(id)` (`@Cacheable("orders")`)    | Unknown id → `ResponseStatusException(404, "Order {id} not found")` → `application/problem+json` (`ApiExceptionHandler`) |
 | `GET /api/orders/{id}/with-user` | `OrderWithUser { order, user }` | `getOrder(id)` + `UserClient.fetchUser(order.userId())` | Calls `user-service` ***directly*** (no gateway); `user` is `null` if the call fails |
 
 Records ([model/](src/main/java/com/learning/discovery/order/model/)):
@@ -112,8 +112,9 @@ curl -u admin:admin http://localhost:8082/api/orders/101/with-user
 
 - ***Docker must be running*** — on startup `spring-boot-docker-compose` runs `docker compose up`
   on [docker-compose.yaml](docker-compose.yaml), waits for Postgres, and ***builds the datasource URL/credentials
-  itself*** from the running container (no `spring.datasource.*`
-  in [application.yml](src/main/resources/application.yml)).
+  itself*** from the running container; those connection details win over the `spring.datasource.*` fallback in
+  [application.yml](src/main/resources/application.yml) (`DB_URL`/`DB_USER`/`DB_PASSWORD`, default
+  `localhost:5433/orders`), which only matters for `java -jar`, where the optional compose support isn't packaged.
 - ***Postgres 18 on host port 5433*** — DB/user/password all `orders`; `5433:5432` so it does not clash with another
   local Postgres on 5432.
 - ***Start Eureka first*** (see [../README.md §4](../README.md#run-order)) — order-service runs without it, but logs
@@ -289,34 +290,19 @@ in [CacheSchedulingConfig.java](src/main/java/com/learning/discovery/order/confi
 
 ```java
 http
-        .authorizeHttpRequests(auth ->auth
-        .
-
-requestMatchers("/actuator/health/**","/actuator/info",
-                        "/swagger-ui.html","/swagger-ui/**","/v3/api-docs/**","/error").
-
-permitAll()
-            .
-
-anyRequest().
-
-authenticated())
-        .
-
-httpBasic(Customizer.withDefaults())
-        .
-
-formLogin(Customizer.withDefaults())
-        .
-
-csrf(csrf ->csrf.
-
-ignoringRequestMatchers("/api/**","/actuator/**"))
+    .authorizeHttpRequests(auth -> auth
+        .requestMatchers(security.publicPaths().toArray(String[]::new)).permitAll()   // app.security.public-paths
+        .anyRequest().authenticated())
+    .httpBasic(Customizer.withDefaults())
+    .formLogin(Customizer.withDefaults())
+    .csrf(csrf -> csrf.ignoringRequestMatchers("/api/**", "/actuator/**"))
+    .build();
 ```
 
 - ***Single in-memory user*** from `spring.security.user.*` — `admin`/`admin` (overridable via `ACTUATOR_USER`/
   `ACTUATOR_PASSWORD`), role `ACTUATOR`.
-- ***Permitted without auth*** — `/actuator/health/**`, `/actuator/info`, `/swagger-ui/**`, `/v3/api-docs/**`, `/error`;
+- ***Permitted without auth*** — `/actuator/health/**`, `/actuator/info`, `/swagger-ui.html`, `/swagger-ui/**`,
+  `/v3/api-docs/**`, `/error`;
   everything else (all `/api/**`, every other actuator endpoint, `/login` page aside) needs authentication.
 - ***HTTP Basic + form login side by side*** — API clients (e.g. `Accept: application/json`) get `401` with
   `WWW-Authenticate: Basic`; a browser navigating to a protected page is redirected to the default `/login` form.
@@ -341,7 +327,8 @@ ignoringRequestMatchers("/api/**","/actuator/**"))
   `AUTHENTICATION_SUCCESS` / `AUTHENTICATION_FAILURE` (and authorization failures) for every login attempt, shown at
   `/actuator/auditevents` / SBA "Audit Events".
 
-**Outbound security** — Eureka registration uses `http://${user}:${pass}@localhost:8761/eureka/`, SBA reads
+**Outbound security** — Eureka registration uses `http://${user}:${pass}@…/eureka/` for each of the three registry
+nodes (`localhost:8761`, `127.0.0.1:8762`, `127.0.0.2:8763`), SBA reads
 `eureka.instance.metadata-map.user.name/user.password` to poll this instance's actuator, and `UserClient` sends Basic
 auth to `user-service`. Repo-wide picture: [../README.md §10](../README.md#security-and-sba-features).
 
@@ -433,7 +420,9 @@ view (as of 2026, SBA 4.1).
 spring:
   application:
     name: order-service              # Eureka service id ORDER-SERVICE, log file name
-  # no spring.datasource.* — docker-compose support wires it from docker-compose.yaml
+  docker.compose.file: order-service/docker-compose.yaml   # wires the datasource from the running container
+  datasource:                        # fallback for java -jar (compose support not packaged)
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/orders}
   cache:
     type: caffeine
     cache-names: orders
@@ -460,8 +449,10 @@ server:
 eureka:
   client:
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/
+      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
   instance:
+    lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
+    lease-expiration-duration-in-seconds: 30   # (default 90)
     prefer-ip-address: true
     metadata-map: # SBA uses these to authenticate its actuator polling
       user.name: ${spring.security.user.name}
@@ -500,10 +491,12 @@ runs `*Test`, failsafe runs `*IT`).
 |-------------------------------------------------------------|-------------------------------------------------------------------------------|
 | `getOrdersReturnsSeedList`                                  | `GET /api/orders` → 200, 3 items, first product `Keyboard`                    |
 | `getOrderByIdReturnsMatch`                                  | `GET /api/orders/102` → `Monitor`, quantity 2                                 |
-| `getOrderByUnknownIdReturns404`                             | `GET /api/orders/999` → 404                                                   |
+| `getOrderByUnknownIdReturns404ProblemDetail`                | `GET /api/orders/999` → 404 ProblemDetail, `detail` "Order 999 not found"     |
+| `nonNumericIdReturns400ProblemDetail`                       | `GET /api/orders/abc` → 400 ProblemDetail                                     |
 | `getOrderWithUserEnrichesFromUserService`                   | `/api/orders/101/with-user` → `order.product = Keyboard`, `user.name = Alice` |
 | `getOrderWithUserWhenUserServiceUnreachableReturnsNullUser` | `fetchUser` empty → 200, `order` present, `user` absent                       |
 | `getOrdersWithoutCredentialsReturns401`                     | `@WithAnonymousUser` + `Accept: application/json` → 401                       |
+| `unexpectedExceptionReturns500ProblemDetailWithoutStackTrace` | `fetchUser` throws → 500 ProblemDetail with a generic `detail`, no internals |
 
 **Integration — [OrderServiceApplicationIT.java](src/test/java/com/learning/discovery/order/OrderServiceApplicationIT.java)**
 (`@SpringBootTest(RANDOM_PORT)` + `RestTestClient`; ***Testcontainers `postgres:18`*** with `@ServiceConnection`, so
@@ -520,7 +513,12 @@ Docker still required):
 | `quartzEndpointListsHeartbeatJob`            | `/actuator/quartz/jobs` → `groups.demo.jobs[0] = heartbeatJob`                                                                                                           |
 | `actuatorExposesSbaEndpoints`                | `/actuator` links include `httpexchanges`, `auditevents`, `sbom`, `quartz`, `jolokia`, `sessions` (not `startup` — only `main()` installs `BufferingApplicationStartup`) |
 | `sessionsEndpointIsBackedByJdbcRepository`   | `/actuator/sessions?username=admin` → `sessions` is an array                                                                                                             |
+| `healthShowsCustomIndicatorsAndProbes`       | `ordersCache` UP with 6 entries, `userService` UNKNOWN, `liveness`/`readiness` groups public                                                                             |
+| `infoShowsAppJavaOsAndProcess`               | anonymous `/actuator/info` → `app.name`, `app.tier`, `java`, `os`, `process`                                                                                             |
+| `customMetricsAreRegistered`                 | `orders.cache.refresh` timer and `orders.db.reads{op:findAll}` counter recorded                                                                                          |
 | `healthEndpointReportsUpWithoutCredentials`  | anonymous `/actuator/health` → `status: UP`                                                                                                                              |
+| `openApiSpecIsPublicAndDeclaresBasicAuth`    | anonymous `/v3/api-docs` → `basicAuth` scheme, server URL `/`, documented 404 on `/api/orders/{id}`                                                                      |
+| `swaggerUiIsPublic`                          | anonymous `/swagger-ui.html` → 2xx                                                                                                                                       |
 
 <a id="gotchas"></a>
 
@@ -531,7 +529,7 @@ Docker still required):
 | `No Docker Compose file found` / `… docker-compose.yaml does not exist`           | Started with a working directory other than the repo root (e.g. the module, `$MODULE_WORKING_DIR$`)                                              | Set the run config's working directory to the project root, or override `spring.docker.compose.file=docker-compose.yaml` |
 | `Bind for 0.0.0.0:5433 failed: port is already allocated`                         | Another/stale container (often from a different Compose project) holds 5433                                                                      | `docker ps --filter publish=5433`, then `docker rm -f <id>`; or `docker compose down` in the directory that started it   |
 | `No host port mapping found` / datasource not configured                          | The compose service publishes no host port, so Boot can't build a JDBC URL                                                                       | Keep `ports: - "5433:5432"` in [docker-compose.yaml](docker-compose.yaml)                                                |
-| Startup fails connecting to Docker                                                | Docker daemon not running                                                                                                                        | Start Docker; the app has no fallback datasource                                                                         |
+| Startup fails connecting to Docker                                                | Docker daemon not running                                                                                                                        | Start Docker; under `spring-boot:run`/IDE compose support aborts startup — the `DB_URL` fallback only applies to `java -jar` |
 | `401` on `/api/**` or actuator                                                    | Missing/wrong Basic credentials, or `ACTUATOR_USER/PASSWORD` set differently in this process vs. the caller                                      | `curl -u admin:admin …`; keep the env vars identical across all modules                                                  |
 | `/with-user` returns `"user": null`                                               | `user-service` down, not yet registered/fetched by Eureka (registry cache lag ~30 s), or rejected the credentials                                | Start `user-service`, wait for it in the Eureka dashboard, check its logs                                                |
 | SBA Sessions view empty                                                           | Only Basic-auth traffic so far — Basic creates no session                                                                                        | Log in at http://localhost:8082/login, then search username `admin`                                                      |

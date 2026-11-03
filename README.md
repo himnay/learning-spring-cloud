@@ -131,8 +131,8 @@ own schedule to drive the dashboard. See the
 the raw Eureka dashboard.
 
 > ⚠️ So the dashboard has something to show, every service exposes `env`, `configprops`,
-> `beans`, `threaddump` and `heapdump` over HTTP with no authentication. That is fine on a
-> laptop and dangerous anywhere else: a heap dump contains every secret the process holds.
+> `beans`, `threaddump` and `heapdump` over HTTP, guarded only by the one shared Basic login
+> (`admin`/`admin`, [§10](#security-and-sba-features)). That is fine on a laptop and dangerous anywhere else: a heap dump contains every secret the process holds.
 > Outside local development, serve actuator on a separate `management.server.port` that only
 > the admin server can reach (or secure it), and drop `heapdump` from the exposure list.
 
@@ -146,7 +146,7 @@ sequenceDiagram
     participant Admin as admin-server :8084
     Note over User, Eureka: startup — happens once per service
     User ->> Eureka: register(USER-SERVICE, host:8081)
-    loop every 30s
+    loop every 10s
         User ->> Eureka: heartbeat (renew lease)
     end
 
@@ -194,8 +194,8 @@ service that registers with Eureka shows up in Admin automatically, no
 `admin-server` config change needed.
 
 `eureka-server` registers with itself (`register-with-eureka: true`,
-`fetch-registry: false`) purely so `admin-server` can discover it — the
-registry is still a single node, it just lists itself.
+`fetch-registry: true`) so `admin-server` can discover it — every running node
+(`peer1`–`peer3`) lists itself under the one `EUREKA-SERVER` app.
 
 ### <span style="color:hsl(341,80%,58%)">Load balancing across multiple instances of the same service</span>
 
@@ -304,7 +304,7 @@ and pass `spring.datasource.*`, or use `spring-boot:run`.
   replicated; each node's *DS Replicas* lists the others) — list
   `USER-SERVICE`,
   `ORDER-SERVICE`, `PRODUCT-SERVICE`, `GATEWAY-SERVICE`, `ADMIN-SERVER` once all
-  5 clients register (takes a few seconds after startup; default renewal interval).
+  5 clients register (takes a few seconds after startup; heartbeats every 10 s).
 - **Spring Boot Admin dashboard**: http://localhost:8084 — same instances as
   Eureka above (discovered via [`DiscoveryClient`][DiscoveryClient], not manually registered), but
   with drill-down per instance: health, `/env`, `/metrics`, `/loggers` (change
@@ -365,9 +365,11 @@ Run all tests: `mvn clean verify` (failsafe plugin from `super-pom` runs the
 
 A different `server.port` means a different Eureka `instanceId` (default
 `host:appName:port`) — it's registered as a brand-new instance, not an
-update of the old one. The old entry is only removed once its lease expires;
-`eureka-server` has self-preservation on with a low local threshold (0.5), so eviction
-happens about 30s after the last heartbeat unless many instances die at once. The gateway's own local
+update of the old one. A clean shutdown deregisters the old entry at once; after a crash it is
+only removed once its lease expires. `eureka-server` has self-preservation on with a low local threshold (0.5), so
+eviction happens 60–90 s after the last heartbeat (lease expiry is effectively 2 × the 30 s
+`lease-expiration-duration-in-seconds` — a known `Lease.renew()` quirk — plus up to one 30 s eviction sweep) unless
+many instances die at once. The gateway's own local
 registry cache picks up the new instance on its next fetch cycle (every 30s
 by default). In the gap between the old instance dying and the gateway's
 cache refreshing, `lb://` may still resolve to the dead port and a call can
@@ -415,9 +417,9 @@ to be unreachable at that instant.
 already round-robins between instances?**
 
 It doesn't implement round-robin itself — "the gateway round-robins" is
-observed behavior, not gateway code. `spring-cloud-starter-gateway-server-webflux`
-pulls in `spring-cloud-starter-loadbalancer` transitively (neither module pom
-declares it explicitly); the gateway's [`ReactiveLoadBalancerClientFilter`][ReactiveLoadBalancerClientFilter]
+observed behavior, not gateway code. `spring-cloud-starter-netflix-eureka-client`
+pulls in `spring-cloud-starter-loadbalancer` transitively (the gateway starter has it only as an optional
+dependency, and `gateway-service/pom.xml` doesn't declare it; `order-service/pom.xml` does); the gateway's [`ReactiveLoadBalancerClientFilter`][ReactiveLoadBalancerClientFilter]
 only recognizes the `lb://` scheme and delegates instance selection to a
 [`ReactorServiceInstanceLoadBalancer`][ReactorServiceInstanceLoadBalancer] bean (default: `RoundRobinLoadBalancer`).
 The split exists because the same load-balancer library is reused by plain
@@ -507,14 +509,17 @@ explicitly to guarantee uniqueness.
 **What's the worst-case time between an instance actually going down and
 the gateway noticing and routing around it?**
 
-Stack the intervals: up to ~30s for `eureka-server` to detect the missed
-heartbeat and evict (self-preservation off, so no extra delay there) + up to
+Stack the intervals: up to ~90s for `eureka-server` to evict the crashed
+instance (lease expiry is effectively 2 × the 30 s `lease-expiration-duration-in-seconds`
+because of a known `Lease.renew()` quirk, plus up to one 30 s eviction sweep; self-preservation
+is on, but with the 0.5 threshold one dead instance doesn't trip it) + up to 30s for the server's
+read-only response cache (`response-cache-update-interval-ms`) + up to
 30s for the gateway's own `registryFetchIntervalSeconds` to pull that
 change + the load balancer's own instance-list cache (Spring Cloud
 LoadBalancer caches the resolved list separately, default TTL ~35s) before
 it stops offering the dead instance. Worst case, a client can be routed to
-an already-dead instance for **close to two minutes** after the failure,
-purely from cache-staleness layered three deep — no bug involved, just three
+an already-dead instance for **about three minutes** after the failure,
+purely from cache-staleness layered four deep — no bug involved, just
 independent caches each doing their job on their own clock. Tightening any
 one of those intervals trades staleness for load on `eureka-server` and the
 gateway.
@@ -845,8 +850,8 @@ HTTP here (`management.endpoints.web.exposure.include` in each `application.yml`
 of them sit behind HTTP Basic except `health` and `info`; see [§10](#security-and-sba-features) for the SBA view each
 one feeds.
 
-- ***Boot's own default*** — over HTTP only `health` is exposed; every endpoint except `shutdown` is accessible once
-  exposed (`shutdown` needs `management.endpoint.shutdown.access: unrestricted`).
+- ***Boot's own default*** — over HTTP only `health` is exposed; every endpoint except `shutdown` and `heapdump` is
+  accessible once exposed (both need `management.endpoint.<id>.access: unrestricted`; `heapdump` since Boot 3.5).
 - ***`eureka`*** — `eureka-server`: one list for every node (`peer1`, `peer2`, `peer3`).
 - ***`zipkin-server`*** is not in the table: it runs Zipkin's own server (it registers in Eureka as `zipkin-server`
   through `zipkin.discovery.eureka`), not Spring Boot Actuator.

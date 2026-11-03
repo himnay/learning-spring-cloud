@@ -58,11 +58,11 @@ AP/CAP, self-preservation and eviction timing, see the [root README](../README.m
   (`lease-renewal-interval-in-seconds` / `lease-expiration-duration-in-seconds`, defaults 30 / 90); the server matches
   with `expected-client-renewal-interval-seconds: 10` (so the self-preservation threshold is computed correctly), sweeps
   every 30 s.
-- ***Dashboard header*** — `eureka.environment: ${EUREKA_ENVIRONMENT:sit}` and
+- ***Dashboard header*** — `eureka.environment: ${EUREKA_ENVIRONMENT:SIT}` and
   `eureka.datacenter: ${EUREKA_DATACENTER:TX}` replace the defaults `test` / `default` shown as "Environment" / "Data
   center" on the dashboard. Labels only — they change no registry behaviour.
-- ***No other eviction tuning*** — lease renewal/expiry and the eviction timer run on Eureka defaults; only
-  self-preservation is overridden.
+- ***No other eviction tuning*** — beyond the lease/sweep settings above and the self-preservation switch and
+  threshold, eviction runs on Eureka defaults.
 - ***Hostname*** — `peer1` is `localhost`, `peer2` `127.0.0.1`, `peer3` `127.0.0.2`: nodes need distinct hostnames,
   and all three are loopback without an `/etc/hosts` entry. Linux and Windows route all of `127.0.0.0/8` to loopback;
   on macOS run `sudo ifconfig lo0 alias 127.0.0.2` once before starting `peer3`.
@@ -203,7 +203,7 @@ sequenceDiagram
 
     Client->>Eureka: POST /eureka/apps/USER-SERVICE (Basic admin:admin, no CSRF token)
     Eureka-->>Client: 204 registered
-    loop every 30s
+    loop every 10s
         Client->>Eureka: PUT /eureka/apps/USER-SERVICE/{instanceId} (heartbeat)
         Eureka-->>Client: 200 lease renewed
     end
@@ -345,6 +345,7 @@ eureka.instance.hostname: 127.0.0.2
 | `healthEndpointIsPublicAndReportsUp`     | `GET /actuator/health` without auth → 200, `$.status == "UP"`                                                    |
 | `registryApiRejectsAnonymousCallers`     | `GET /eureka/apps` without auth → 401                                                                            |
 | `registryApiAcceptsBasicAuth`            | `GET /eureka/apps` with Basic → 200                                                                              |
+| `heartbeatForUnknownInstanceIsBare404`   | heartbeat for an unregistered instance → bare `404` (no JSON body), see [Gotchas](#gotchas)                      |
 | `sbaEndpointsAreExposedBehindAuth`       | `/actuator/quartz` anonymous → 401; `quartz`, `httpexchanges`, `auditevents`, `jolokia`, `sbom` with Basic → 200 |
 
 [`PeerProfilesTests`](src/test/java/com/learning/discovery/eureka/PeerProfilesTests.java) — loads `application.yml`
@@ -436,7 +437,7 @@ self-preservation   = renews (last min) < renews threshold
 - ***Clients still have to cope with zombies*** — the registry may list a dead instance, so callers need timeouts and
   retries on another instance (Spring Cloud LoadBalancer retry, Resilience4j).
 - ***Turning it off*** — `EUREKA_SELF_PRESERVATION=false` (`enable-self-preservation: false`): dead instances vanish
-  within ~1 min, but one network blip can wipe the registry. Acceptable on a single dev machine, not in production.
+  within ~1.5 min ([Q2](#qa-crash-eviction-timeline)), but one network blip can wipe the registry. Acceptable on a single dev machine, not in production.
 
 <a id="qa-crash-eviction-timeline"></a>
 
