@@ -27,8 +27,8 @@ service-to-service call. Repo-wide context (module list, run order, parent/BOM
 chain, SBA feature matrix) lives in the root [../README.md](../README.md); this
 file only covers what is specific to this module.
 
-> 🔒 ***HTTPS only*** on `:8082` (`server.ssl.bundle: server`); registers in Eureka as `https://127.0.0.1:8082`
-> (`secure-port-enabled`, `ip-address`), and calls the registry over TLS through the `trust` bundle
+> 🔒 ***HTTPS only*** on `:8082` (`server.ssl.bundle: ${app.tls.server-bundle}` → bundle `service-identity`); registers in Eureka as `https://127.0.0.1:8082`
+> (`secure-port-enabled`, `ip-address`), and calls the registry over TLS through the `internal-ca` bundle
 > ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/order/config/EurekaClientTlsConfig.java)). Its own call to
 > `user-service` stays HTTP. Run `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt`. Full guide:
 > root [§9](../README.md#https).
@@ -615,7 +615,7 @@ spring:
   boot:
     admin:
       client:
-        url: http://localhost:8084                # where admin-server is
+        url: https://localhost:8084               # where admin-server is (HTTPS)
         username: ${ACTUATOR_USER:admin}          # credentials FOR admin-server (POST /instances)
         password: ${ACTUATOR_PASSWORD:admin}
         instance:

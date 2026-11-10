@@ -24,6 +24,7 @@ import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.glassfish.jersey.apache.connector.ApacheClientProperties;
 import org.glassfish.jersey.client.ClientConfig;
 import org.glassfish.jersey.client.ClientProperties;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ssl.SslBundles;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -33,7 +34,8 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 
 /**
- * The two outbound HTTPS paths of a registry node, both trusting the CA in the {@code trust} SSL bundle.
+ * The two outbound HTTPS paths of a registry node, both trusting the CA in the SSL bundle named by
+ * {@code app.tls.trust-bundle}.
  * Neither reads {@code spring.ssl.bundle.*} on its own:
  * <ol>
  * <li><b>Own Eureka client</b> (registers this node with its peers, fetches the registry). On the server
@@ -49,12 +51,11 @@ import java.net.UnknownHostException;
 @Configuration(proxyBeanMethods = false)
 class EurekaTlsConfig {
 
-    static final String TRUST_BUNDLE = "trust";
-
     @Bean
-    Jersey3DiscoveryClientOptionalArgs jersey3DiscoveryClientOptionalArgs(SslBundles sslBundles) {
+    Jersey3DiscoveryClientOptionalArgs jersey3DiscoveryClientOptionalArgs(SslBundles sslBundles,
+                                                                          @Value("${app.tls.trust-bundle}") String trustBundle) {
         Jersey3DiscoveryClientOptionalArgs args = new Jersey3DiscoveryClientOptionalArgs();
-        args.setSSLContext(sslBundles.getBundle(TRUST_BUNDLE).createSslContext());
+        args.setSSLContext(sslBundles.getBundle(trustBundle).createSslContext());
         return args;
     }
 
@@ -62,9 +63,10 @@ class EurekaTlsConfig {
     @Bean
     PeerEurekaNodes peerEurekaNodes(PeerAwareInstanceRegistry registry, EurekaServerConfig serverConfig,
                                     EurekaClientConfig clientConfig, ServerCodecs serverCodecs,
-                                    ApplicationInfoManager applicationInfoManager, SslBundles sslBundles) {
+                                    ApplicationInfoManager applicationInfoManager, SslBundles sslBundles,
+                                    @Value("${app.tls.trust-bundle}") String trustBundle) {
         return new TlsPeerEurekaNodes(registry, serverConfig, clientConfig, serverCodecs, applicationInfoManager,
-                sslBundles.getBundle(TRUST_BUNDLE).createSslContext());
+                sslBundles.getBundle(trustBundle).createSslContext());
     }
 
     /**

@@ -25,8 +25,8 @@ every Spring Boot Admin (SBA) view. Shared setup that applies to every module (p
 view matrix) lives in the
 [root README](../README.md); this file covers only what `product-service` itself does.
 
-> 🔒 ***HTTPS only*** on `:8083` (`server.ssl.bundle: server`); registers in Eureka as `https://127.0.0.1:8083`
-> (`secure-port-enabled`, `ip-address`), and calls the registry over TLS through the `trust` bundle
+> 🔒 ***HTTPS only*** on `:8083` (`server.ssl.bundle: ${app.tls.server-bundle}` → bundle `service-identity`); registers in Eureka as `https://127.0.0.1:8083`
+> (`secure-port-enabled`, `ip-address`), and calls the registry over TLS through the `internal-ca` bundle
 > ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/product/config/EurekaClientTlsConfig.java)). Run
 > `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt`. Full guide: root [§9](../README.md#https).
 
@@ -500,7 +500,7 @@ spring:
   boot:
     admin:
       client:
-        url: http://localhost:8084                # where admin-server is
+        url: https://localhost:8084               # where admin-server is (HTTPS)
         username: ${ACTUATOR_USER:admin}          # credentials FOR admin-server (POST /instances)
         password: ${ACTUATOR_PASSWORD:admin}
         instance:

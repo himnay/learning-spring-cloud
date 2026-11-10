@@ -4,21 +4,27 @@
 
 1. 🧭 [Overview](#overview)
 2. 🔀 [How a request reaches a downstream service](#request-routing-flow)
-3. 🚀 [Run and credentials](#run-and-credentials)
-4. 🔐 [Security](#security)
-5. 📊 [Actuator endpoints](#actuator-endpoints)
-6. ⏱️ [Quartz job, logging and configuration](#quartz-logging-config)
-7. 🧪 [Tests](#tests)
-8. ⚠️ [Gotchas](#gotchas)
-9. ❓ [Q&A](#qa)
-    - 9.1 🔥 [The `gateway` actuator endpoint is `access: unrestricted` and `env` POST + `refresh` are on — what can someone holding the credentials do to the route table, and why is that worse than on a backend?](#qa-actuator-route-injection)
-    - 9.2 🔥 [Why are the service specs routed at `/api-docs/{service}` instead of `/v3/api-docs/{service}` — and what decides who wins when a gateway route and a local handler match the same path?](#qa-route-vs-handler-precedence)
-    - 9.3 🔥 [A teammate adds a `GlobalFilter` that checks an API key with a blocking JDBC lookup — what happens under load, and how do you catch and fix it?](#qa-blocking-in-filter)
-    - 9.4 🔥🔥 [Traffic grows 10× across 3 gateway instances — design per-client rate limiting, timeouts and circuit breaking at this edge, given that every client here logs in as the same `admin` user](#qa-edge-rate-limit-breaker)
-    - 9.5 🔥🔥 [Canary `user-service` v2 at 5 % of traffic through this gateway — how, given Eureka discovery and `order-service` calling `user-service` directly?](#qa-canary-release)
-    - 9.6 🔥 [What are the drawbacks of Spring Cloud LoadBalancer, which picks the instance for every `lb://` route here?](#qa-loadbalancer-drawbacks)
-    - 9.7 [Does Spring Cloud LoadBalancer need Redis?](#qa-loadbalancer-redis)
-    - 9.8 [Which load-balancing strategies does Spring Cloud LoadBalancer offer, and how would you switch the gateway to one?](#qa-loadbalancer-strategies)
+3. 🔬 [Internals: Spring Cloud Gateway 5.0 (server-webflux)](#gateway-internals)
+    - 3.1 [Package map](#gateway-internals-1)
+    - 3.2 [Design](#gateway-internals-2)
+    - 3.3 [One request through the gateway — sequence](#gateway-internals-3)
+    - 3.4 [Global filters and their order](#gateway-internals-4)
+    - 3.5 [Design patterns and principles in Spring Cloud Gateway](#gateway-internals-5)
+4. 🚀 [Run and credentials](#run-and-credentials)
+5. 🔐 [Security](#security)
+6. 📊 [Actuator endpoints](#actuator-endpoints)
+7. ⏱️ [Quartz job, logging and configuration](#quartz-logging-config)
+8. 🧪 [Tests](#tests)
+9. ⚠️ [Gotchas](#gotchas)
+10. ❓ [Q&A](#qa)
+    - 10.1 🔥 [The `gateway` actuator endpoint is `access: unrestricted` and `env` POST + `refresh` are on — what can someone holding the credentials do to the route table, and why is that worse than on a backend?](#qa-actuator-route-injection)
+    - 10.2 🔥 [Why are the service specs routed at `/api-docs/{service}` instead of `/v3/api-docs/{service}` — and what decides who wins when a gateway route and a local handler match the same path?](#qa-route-vs-handler-precedence)
+    - 10.3 🔥 [A teammate adds a `GlobalFilter` that checks an API key with a blocking JDBC lookup — what happens under load, and how do you catch and fix it?](#qa-blocking-in-filter)
+    - 10.4 🔥🔥 [Traffic grows 10× across 3 gateway instances — design per-client rate limiting, timeouts and circuit breaking at this edge, given that every client here logs in as the same `admin` user](#qa-edge-rate-limit-breaker)
+    - 10.5 🔥🔥 [Canary `user-service` v2 at 5 % of traffic through this gateway — how, given Eureka discovery and `order-service` calling `user-service` directly?](#qa-canary-release)
+    - 10.6 🔥 [What are the drawbacks of Spring Cloud LoadBalancer, which picks the instance for every `lb://` route here?](#qa-loadbalancer-drawbacks)
+    - 10.7 [Does Spring Cloud LoadBalancer need Redis?](#qa-loadbalancer-redis)
+    - 10.8 [Which load-balancing strategies does Spring Cloud LoadBalancer offer, and how would you switch the gateway to one?](#qa-loadbalancer-strategies)
 
 API gateway module of [learning-spring-cloud](../README.md). The project-wide
 picture (all 6 modules, Eureka registry flow, Spring Boot Admin) lives in the root
@@ -26,7 +32,7 @@ README; this file covers only what `gateway-service` itself implements.
 
 > 🔒 The gateway still listens on plain HTTP (`:8080`), but routes to `order-service` and `product-service` over
 > ***HTTPS***: they register as secure, so `lb://` resolves to `https://127.0.0.1:<port>`, and the Netty client trusts the dev
-> CA via `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle: trust`. Eureka calls use TLS too
+> CA via `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle: ${app.tls.trust-bundle}` (bundle `internal-ca`). Eureka calls use TLS too
 > ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/gateway/config/EurekaClientTlsConfig.java)). Full guide:
 > root [§9](../README.md#https).
 
@@ -46,7 +52,7 @@ README; this file covers only what `gateway-service` itself implements.
 
 | Concern         | Dependency ([pom.xml](pom.xml))                                                                                                                   | Version source                                                             |
 |-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|
-| Gateway         | `spring-cloud-starter-gateway-server-webflux`                                                                                                     | Spring Cloud 2025.1.3 (via root [pom.xml](../pom.xml) / `super-pom` 1.2.1) |
+| Gateway         | `spring-cloud-starter-gateway-server-webflux`                                                                                                     | Spring Cloud 2025.1.4 (via root [pom.xml](../pom.xml) / `super-pom` 1.2.2) |
 | Discovery       | `spring-cloud-starter-netflix-eureka-client`                                                                                                      | Spring Cloud BOM                                                           |
 | Ops             | `spring-boot-starter-actuator`                                                                                                                    | Spring Boot 4.1                                                            |
 | Tracing         | `spring-boot-starter-opentelemetry` → OTLP to [../zipkin-server](../zipkin-server/README.md)                                                      | Spring Boot 4.1                                                            |
@@ -68,7 +74,7 @@ README; this file covers only what `gateway-service` itself implements.
 
 - ***No `StripPrefix` / `RewritePath`*** — `/api/users/1` arrives downstream as `/api/users/1`, matching the backends'
   own controller mappings.
-- ***No `RemoveRequestHeader=Authorization`*** — deliberate, see [§4](#security).
+- ***No `RemoveRequestHeader=Authorization`*** — deliberate, see [§5](#security).
 - ***`lb://` = load-balanced service ID*** — Spring Cloud LoadBalancer's `ReactiveLoadBalancerClientFilter` looks the ID
   up in the gateway's local Eureka cache (refreshed every 30s by default), picks an instance (round-robin by default),
   and rewrites the request to that instance's `host:port`. Step by step in [§2](#request-routing-flow); registry
@@ -82,8 +88,8 @@ README; this file covers only what `gateway-service` itself implements.
 - ***The Eureka client doesn't route anything.*** On the request path it only answers "which instances does
   `USER-SERVICE` have?" — and it answers from ***its local in-memory registry copy***, not by calling `eureka-server`.
   ***Spring Cloud LoadBalancer*** picks the instance; ***Reactor Netty*** sends the request.
-- ***One request, `GET /api/users/1`*** (class names checked against Gateway 5.0.3, eureka-client 5.0.2,
-  loadbalancer 5.0.3, as of 2026):
+- ***One request, `GET /api/users/1`*** (class names checked against Gateway 5.0.4, eureka-client 5.0.3,
+  loadbalancer 5.0.4, as of 2026):
 
 ```text
 client ─► gateway-service :8080
@@ -133,9 +139,190 @@ client ─► gateway-service :8080
   the Kubernetes discovery client or a static list (`spring.cloud.discovery.client.simple.instances`) can replace it
   with no route changes.
 
+<a id="gateway-internals"></a>
+
+## <span style="color:hsl(270,70%,62%)">3. 🔬 Internals: Spring Cloud Gateway 5.0 (server-webflux)</span>
+
+Read from `spring-cloud-gateway-server-webflux` 5.0.4 (Spring Cloud 2025.1.4). The gateway is a Spring WebFlux
+application whose one "controller" is a ***handler mapping that matches routes*** and a ***web handler that runs a
+sorted filter chain***; the last filter in the chain proxies the request with Reactor Netty.
+
+<a id="gateway-internals-1"></a>
+
+### 3.1 Package map
+
+| Package (`org.springframework.cloud.gateway`) | Key types | Job |
+|---|---|---|
+| `route` | `Route` (id, uri, order, `AsyncPredicate`, filters, metadata), `RouteDefinition`, `RouteLocator`, `RouteDefinitionRouteLocator`, `CachingRouteLocator`, `CompositeRouteDefinitionLocator`, `CachingRouteDefinitionLocator` | where routes come from and how definitions become runtime routes |
+| `config` | `GatewayAutoConfiguration`, `PropertiesRouteDefinitionLocator` (reads `spring.cloud.gateway.server.webflux.routes`), `HttpClientFactory`, `HttpClientProperties`, `HttpClientSslConfigurer` | wiring, the shared Netty `HttpClient`, TLS (the `ssl-bundle` used here) |
+| `handler` | `RoutePredicateHandlerMapping`, `FilteringWebHandler`, `AsyncPredicate` | match a route, run its filter chain |
+| `handler.predicate` | `PathRoutePredicateFactory`, `HostRoutePredicateFactory`, `MethodRoutePredicateFactory`, `HeaderRoutePredicateFactory`, `WeightRoutePredicateFactory`, … | `Path=/api/users/**` and friends |
+| `filter` | `GlobalFilter`, `GatewayFilter`, `GatewayFilterChain`, `OrderedGatewayFilter`; `RouteToRequestUrlFilter`, `ReactiveLoadBalancerClientFilter`, `NettyRoutingFilter`, `NettyWriteResponseFilter`, `WebsocketRoutingFilter`, `ForwardRoutingFilter`, `GatewayMetricsFilter` | the pipeline |
+| `filter.factory` | `SetPathGatewayFilterFactory` (used here for the api-docs routes), `RewritePath…`, `AddRequestHeader…`, `RequestRateLimiter…`, `CircuitBreaker…`, `Retry…` | per-route filters, configured by name in YAML |
+| `filter.headers` | `HttpHeadersFilter` (`XForwardedHeadersFilter`, `ForwardedHeadersFilter`, `RemoveHopByHopHeadersFilter`) | which headers go downstream and back |
+| `discovery` | `DiscoveryClientRouteDefinitionLocator` | optional "one route per registered service" (not enabled here) |
+| `actuate` | `GatewayControllerEndpoint` (`/actuator/gateway/routes`, `/refresh`, …) | inspect and change routes at runtime |
+| `support` | `ServerWebExchangeUtils` (exchange attribute keys), `DelegatingServiceInstance` | the shared state between filters |
+
+<a id="gateway-internals-2"></a>
+
+### 3.2 Design
+
+```mermaid
+classDiagram
+    direction LR
+    class RouteDefinitionLocator {
+        <<interface>>
+        getRouteDefinitions() Flux~RouteDefinition~
+    }
+    class PropertiesRouteDefinitionLocator
+    class CompositeRouteDefinitionLocator
+    class RouteLocator {
+        <<interface>>
+        getRoutes() Flux~Route~
+    }
+    class RouteDefinitionRouteLocator {
+        RoutePredicateFactory[] predicates
+        GatewayFilterFactory[] filters
+        convertToRoute(def) Route
+    }
+    class CachingRouteLocator {
+        cache via CacheFlux
+        onApplicationEvent(RefreshRoutesEvent)
+    }
+    class Route {
+        String id
+        URI uri
+        int order
+        AsyncPredicate predicate
+        List~GatewayFilter~ filters
+    }
+    class RoutePredicateHandlerMapping {
+        getHandlerInternal(exchange) → FilteringWebHandler
+    }
+    class FilteringWebHandler {
+        List~GatewayFilter~ globalFilters
+        handle(exchange)
+        getCombinedFilters(route) sorted
+    }
+    class GatewayFilterChain {
+        <<interface>>
+        filter(exchange) Mono~Void~
+    }
+    class GlobalFilter {
+        <<interface>>
+    }
+    class GatewayFilter {
+        <<interface>>
+        filter(exchange, chain) Mono~Void~
+    }
+    RouteDefinitionLocator <|.. PropertiesRouteDefinitionLocator
+    RouteDefinitionLocator <|.. CompositeRouteDefinitionLocator
+    RouteLocator <|.. RouteDefinitionRouteLocator
+    RouteLocator <|.. CachingRouteLocator
+    CachingRouteLocator o-- RouteLocator : delegate
+    RouteDefinitionRouteLocator --> RouteDefinitionLocator
+    RouteDefinitionRouteLocator ..> Route : builds
+    RoutePredicateHandlerMapping --> RouteLocator
+    RoutePredicateHandlerMapping --> FilteringWebHandler
+    FilteringWebHandler --> GlobalFilter : adapts to OrderedGatewayFilter
+    FilteringWebHandler ..> GatewayFilterChain : DefaultGatewayFilterChain
+    Route o-- GatewayFilter
+```
+
+- ***Two shapes of the same route*** — `RouteDefinition` is data (YAML: `id`, `uri`, `predicates: [Path=…]`,
+  `filters: [SetPath=…]`); `RouteDefinitionRouteLocator` turns each `Path=` / `SetPath=` shortcut into a
+  `RoutePredicateFactory` / `GatewayFilterFactory` call by name (`PathRoutePredicateFactory` → `Path`), and combines
+  all predicates of a route with `AsyncPredicate.and`.
+- ***`CachingRouteLocator`*** caches the resulting `Flux<Route>` and rebuilds it on `RefreshRoutesEvent` (fired by
+  `POST /actuator/gateway/refresh`, by `/actuator/refresh` when route properties change, or by your code), so route
+  changes need no restart.
+
+<a id="gateway-internals-3"></a>
+
+### 3.3 One request through the gateway — sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as client
+    participant DH as DispatcherHandler (WebFlux)
+    participant HM as RoutePredicateHandlerMapping
+    participant RL as CachingRouteLocator
+    participant FW as FilteringWebHandler
+    participant F as global + route filters (sorted)
+    participant LB as ReactiveLoadBalancerClientFilter<br/>(order 10150)
+    participant NR as NettyRoutingFilter (LOWEST_PRECEDENCE)
+    participant OS as order-service (https)
+
+    C->>DH: GET /api/orders/101 (Basic)
+    DH->>HM: getHandler(exchange) — handler-mapping order 1, after Spring Security's WebFilter chain
+    HM->>RL: getRoutes().filterWhen(route.predicate.apply(exchange)).next()
+    RL-->>HM: route order-service (uri lb://ORDER-SERVICE) → GATEWAY_ROUTE_ATTR
+    HM-->>DH: FilteringWebHandler
+    DH->>FW: handle(exchange)
+    FW->>F: DefaultGatewayFilterChain(global ∪ route filters, AnnotationAwareOrderComparator)
+    F->>F: NettyWriteResponseFilter (-1): registers "write the response after the chain"
+    F->>F: RouteToRequestUrlFilter (10000): GATEWAY_REQUEST_URL_ATTR = lb://ORDER-SERVICE/api/orders/101
+    F->>LB: lb scheme → choose(serviceId) via Spring Cloud LoadBalancer
+    LB->>LB: instance.isSecure() ? https : http → reconstructURI<br/>GATEWAY_REQUEST_URL_ATTR = https://127.0.0.1:8082/api/orders/101
+    LB->>NR: chain.filter
+    NR->>NR: HttpHeadersFilter.filterRequest (X-Forwarded-*, hop-by-hop removal)
+    NR->>OS: Reactor Netty HttpClient (pooled, TLS via ssl-bundle internal-ca)
+    OS-->>NR: 200 + headers → CLIENT_RESPONSE_ATTR / CLIENT_RESPONSE_CONN_ATTR
+    NR-->>F: chain completes
+    F-->>C: NettyWriteResponseFilter streams the body back (post phase)
+```
+
+- ***"Pre" and "post" are just Reactor operators*** — code before `chain.filter(exchange)` runs on the way in, code in
+  `.then(...)` after it runs on the way out. `NettyWriteResponseFilter` has order `-1`, so it is near the outermost
+  layer and writes the downstream response after everything else finished.
+- ***Exchange attributes are the bus*** — filters don't call each other; they read and write well-known keys in
+  `ServerWebExchangeUtils` (`GATEWAY_ROUTE_ATTR`, `GATEWAY_REQUEST_URL_ATTR`, `GATEWAY_ORIGINAL_REQUEST_URL_ATTR`,
+  `CLIENT_RESPONSE_ATTR`, …).
+- ***Order decides who wins*** — route filters (e.g. `SetPath`) get their position in the route definition, globals
+  their `getOrder()`; both lists are merged and sorted on every request.
+
+<a id="gateway-internals-4"></a>
+
+### 3.4 Global filters and their order
+
+| Order | Global filter | Role |
+|---|---|---|
+| `HIGHEST_PRECEDENCE` | `RemoveCachedBodyFilter` | releases a body cached by an earlier filter |
+| `HIGHEST_PRECEDENCE + 1000` | `AdaptCachedBodyGlobalFilter` | re-exposes a cached request body (retries, `ReadBody` predicate) |
+| `-1` | `NettyWriteResponseFilter` | writes the proxied response back (post phase) |
+| `0` | `ForwardPathFilter` | path handling for `forward:` routes |
+| `NettyWrite… + 1` | `GatewayMetricsFilter` | `spring.cloud.gateway.requests` timer |
+| `10000` | `RouteToRequestUrlFilter` | combines route URI and request path into the target URL |
+| `10150` | `ReactiveLoadBalancerClientFilter` | resolves `lb://SERVICE` to one instance, picks `https` for secure instances |
+| `10151` | `LoadBalancerServiceInstanceCookieFilter` | sticky-session cookie (when enabled) |
+| `LOWEST_PRECEDENCE − 1` | `WebsocketRoutingFilter` | `ws://` / `wss://` proxying |
+| `LOWEST_PRECEDENCE` | `NettyRoutingFilter`, `ForwardRoutingFilter` | the actual HTTP call / in-process forward |
+
+A custom `GlobalFilter` ordered below `10150` sees `lb://…`; above it, the resolved instance URL.
+
+<a id="gateway-internals-5"></a>
+
+### 3.5 Design patterns and principles in Spring Cloud Gateway
+
+| Pattern / principle | Where | What it buys |
+|---|---|---|
+| ***Chain of Responsibility (pipeline)*** | `GatewayFilterChain` / `DefaultGatewayFilterChain` with sorted `GatewayFilter`s | every cross-cutting concern (auth headers, rewrite, LB, retry, proxy) is one link |
+| ***Adapter*** | `FilteringWebHandler.GatewayFilterAdapter` wraps each `GlobalFilter` as a `GatewayFilter` (+ `OrderedGatewayFilter`) | one chain type for global and per-route filters |
+| ***Factory (named, config-driven)*** | `RoutePredicateFactory` / `GatewayFilterFactory` beans resolved by name prefix (`Path`, `SetPath`) with typed `Config` objects | YAML shortcuts like `SetPath=/v3/api-docs` without code |
+| ***Composite predicates (Specification)*** | `AsyncPredicate.and/or/negate` combining a route's predicates | arbitrary match rules from simple parts |
+| ***Strategy*** | `RouteDefinitionLocator`s (properties, discovery, Redis, custom), load-balancer algorithms (`RoundRobinLoadBalancer`, random, …), `HttpHeadersFilter`s | change where routes come from or how instances are chosen without touching the pipeline |
+| ***Composite*** | `CompositeRouteDefinitionLocator` merges every locator | properties and discovery routes side by side |
+| ***Decorator / cache-aside*** | `CachingRouteLocator`, `CachingRouteDefinitionLocator` around the real locators | route building happens once, not per request |
+| ***Observer (events)*** | `RefreshRoutesEvent`, `RefreshRoutesResultEvent`, `ApplicationListener` | hot route reload |
+| ***Context object*** | exchange attributes (`ServerWebExchangeUtils`) | loose coupling between filters |
+| ***Reverse proxy / gateway*** | `NettyRoutingFilter` + `HttpHeadersFilter`s | single entry point, header hygiene, TLS termination point for the backends |
+| ***Non-blocking I/O, event loop*** | WebFlux + Reactor Netty end to end | thousands of concurrent proxied requests on a few threads — which is also why one blocking call in a filter stalls everything ([Q3](#qa-blocking-in-filter)) |
+
 <a id="run-and-credentials"></a>
 
-## <span style="color:hsl(66,80%,50%)">3. 🚀 Run and credentials</span>
+## <span style="color:hsl(66,80%,50%)">4. 🚀 Run and credentials</span>
 
 - ***Start `eureka-server` first***, then the backends, then the gateway
   (order: [root README §3](../README.md#run-order)).
@@ -151,7 +338,7 @@ ACTUATOR_USER=ops ACTUATOR_PASSWORD=s3cret mvn -pl gateway-service spring-boot:r
   `ACTUATOR`.
 - ***The same values are reused three times*** — to log in to the gateway, embedded in the Eureka `defaultZone` URL, and
   published as Eureka metadata for SBA. Change the env vars on every module together, because the backends check the
-  same header (see [§4](#security)).
+  same header (see [§5](#security)).
 
 ```bash
 # Through the gateway (Basic creds checked by the gateway AND by the downstream service)
@@ -173,7 +360,7 @@ curl -i http://localhost:8080/api/users
 
 <a id="security"></a>
 
-## <span style="color:hsl(256,80%,58%)">4. 🔐 Security</span>
+## <span style="color:hsl(256,80%,58%)">5. 🔐 Security</span>
 
 Implemented in [SecurityConfig.java](src/main/java/com/learning/discovery/gateway/config/SecurityConfig.java)
 (`@EnableWebFluxSecurity`).
@@ -251,7 +438,7 @@ sequenceDiagram
 
 <a id="actuator-endpoints"></a>
 
-## <span style="color:hsl(33,80%,58%)">5. 📊 Actuator endpoints</span>
+## <span style="color:hsl(33,80%,58%)">6. 📊 Actuator endpoints</span>
 
 All exposed via `management.endpoints.web.exposure.include` in [application.yml](src/main/resources/application.yml).
 Only `health` and `info` are public; the rest need Basic auth. SBA (`admin-server`) authenticates with the `user.name` /
@@ -276,9 +463,9 @@ Only `health` and `info` are public; the rest need Basic auth. SBA (`admin-serve
 | `restart`       | Restart button                                     | `access: unrestricted`; endpoint from Spring Cloud Context                                                                                                                                      |
 | `httpexchanges` | HTTP Exchanges                                     | `InMemoryHttpExchangeRepository` bean in [ActuatorConfig.java](src/main/java/com/learning/discovery/gateway/config/ActuatorConfig.java); recorded by `HttpExchangesWebFilter` (WebFlux variant) |
 | `startup`       | Startup                                            | `BufferingApplicationStartup(2048)` set in `main()` of [GatewayServiceApplication.java](src/main/java/com/learning/discovery/gateway/GatewayServiceApplication.java)                            |
-| `auditevents`   | Audit Events                                       | `InMemoryAuditEventRepository` bean + auditing auth manager ([§4](#security))                                                                                                                   |
+| `auditevents`   | Audit Events                                       | `InMemoryAuditEventRepository` bean + auditing auth manager ([§5](#security))                                                                                                                   |
 | `sbom`          | SBOM                                               | root `cyclonedx-maven-plugin` writes `META-INF/sbom/application.cdx.json` at build time                                                                                                         |
-| `quartz`        | Quartz                                             | `spring.quartz.job-store-type: memory` + `HeartbeatJob` ([§6](#quartz-logging-config))                                                                                                          |
+| `quartz`        | Quartz                                             | `spring.quartz.job-store-type: memory` + `HeartbeatJob` ([§7](#quartz-logging-config))                                                                                                          |
 
 - ***`startup` only exists when launched via `main()`*** — `@SpringBootTest` builds its own `SpringApplication` and
   skips `main()`, so there is no `BufferingApplicationStartup` and `/actuator/startup` is absent in tests.
@@ -307,7 +494,7 @@ curl -u admin:admin -X POST http://localhost:8080/actuator/refresh
 
 <a id="quartz-logging-config"></a>
 
-## <span style="color:hsl(171,80%,58%)">6. ⏱️ Quartz job, logging and configuration</span>
+## <span style="color:hsl(171,80%,58%)">7. ⏱️ Quartz job, logging and configuration</span>
 
 **Quartz demo job** ([job/](src/main/java/com/learning/discovery/gateway/job)):
 
@@ -392,7 +579,7 @@ management:
 
 <a id="tests"></a>
 
-## <span style="color:hsl(0,80%,58%)">7. 🧪 Tests</span>
+## <span style="color:hsl(0,80%,58%)">8. 🧪 Tests</span>
 
 [GatewayServiceApplicationIT.java](src/test/java/com/learning/discovery/gateway/GatewayServiceApplicationIT.java) —
 `@SpringBootTest(webEnvironment = RANDOM_PORT)` + `@AutoConfigureWebTestClient` +
@@ -414,7 +601,7 @@ management:
 
 <a id="gotchas"></a>
 
-## <span style="color:hsl(306,80%,58%)">8. ⚠️ Gotchas</span>
+## <span style="color:hsl(306,80%,58%)">9. ⚠️ Gotchas</span>
 
 - ***503 Service Unavailable on `/api/**`*** — the gateway authenticated you but LoadBalancer found no instance for
   `USER-SERVICE` etc.: backend not started, not yet registered, or the gateway's registry cache hasn't refreshed (up
@@ -438,7 +625,7 @@ management:
 
 <a id="qa"></a>
 
-## <span style="color:hsl(116,80%,58%)">9. ❓ Q&A</span>
+## <span style="color:hsl(116,80%,58%)">10. ❓ Q&A</span>
 
 <a id="qa-actuator-route-injection"></a>
 
@@ -449,7 +636,7 @@ holding the credentials do to the route table, and why is that worse than on a b
   `POST /actuator/gateway/refresh`, adds a live route to ***any*** URI — no restart, no config change in Git.
   `POST /actuator/env` + `POST /actuator/refresh` does the same via properties.
 - ***Why the gateway is the worst place for this***:
-  - ***Credential exfiltration*** — routes forward the caller's `Authorization` header unchanged ([§4](#security)).
+  - ***Credential exfiltration*** — routes forward the caller's `Authorization` header unchanged ([§5](#security)).
     A route `Path=/api/users/**` → `https://attacker.example` (ordered before the real one) harvests every user's
     Basic credentials while still proxying the response, so nobody notices.
   - ***SSRF*** — a route to `http://169.254.169.254/` or an internal admin port turns the gateway into a proxy into

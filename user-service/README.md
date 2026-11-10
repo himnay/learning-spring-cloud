@@ -23,7 +23,7 @@ service-discovery demo — see the root [../README.md](../README.md) for the
 whole picture (Eureka, gateway, Spring Boot Admin, run order).
 
 > 🔒 user-service still serves plain HTTP (`:8081`), but registers, renews and fetches over ***HTTPS*** (`https://`
-> `defaultZone`, `trust` SSL bundle via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/user/config/EurekaClientTlsConfig.java)).
+> `defaultZone`, `internal-ca` SSL bundle via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/user/config/EurekaClientTlsConfig.java)).
 > Full guide: root [§9](../README.md#https).
 
 <a id="overview"></a>
@@ -462,7 +462,7 @@ spring:
   boot:
     admin:
       client:
-        url: http://localhost:8084                # where admin-server is
+        url: https://localhost:8084               # where admin-server is (HTTPS)
         username: ${ACTUATOR_USER:admin}          # credentials FOR admin-server (POST /instances)
         password: ${ACTUATOR_PASSWORD:admin}
         instance:

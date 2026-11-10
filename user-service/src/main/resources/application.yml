@@ -8,7 +8,7 @@ spring:
   ssl:
     bundle: # spring.ssl.bundle.jks.<name>: TLS material by name; certs/generate-certs.sh writes src/main/resources/tls/
       jks:
-        trust: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig)
+        internal-ca: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig)
           truststore:
             location: classpath:tls/truststore.p12
             password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
@@ -36,6 +36,8 @@ spring:
     job-store-type: memory
 
 app:
+  tls: # SSL bundle names, declared once here; server.ssl, HTTP clients and the Eureka TLS beans all reference these
+    trust-bundle: internal-ca         # spring.ssl.bundle.jks.internal-ca: CA this process trusts as a client
   security:
     public-paths: # reachable without auth; everything else needs Basic/form login
       - "/actuator/health/**"

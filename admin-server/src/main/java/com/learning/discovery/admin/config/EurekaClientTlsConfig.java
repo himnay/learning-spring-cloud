@@ -1,6 +1,7 @@
 package com.learning.discovery.admin.config;
 
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBooleanProperty;
 import org.springframework.boot.ssl.SslBundles;
 import org.springframework.cloud.netflix.eureka.http.EurekaClientHttpRequestFactorySupplier;
@@ -10,7 +11,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestClient;
 
 /**
- * Eureka client over HTTPS: trusts the CA in the {@code trust} SSL bundle when it registers, renews and fetches
+ * Eureka client over HTTPS: trusts the CA in the SSL bundle named by {@code app.tls.trust-bundle} when it registers, renews and fetches
  * the registry at the https:// URLs in eureka.client.service-url.defaultZone.
  * <p>
  * The Eureka client doesn't read {@code spring.ssl.bundle.*} (only {@code eureka.client.tls.*} key/trust-store
@@ -25,11 +26,12 @@ class EurekaClientTlsConfig {
 
     @Bean
     RestClientDiscoveryClientOptionalArgs restClientDiscoveryClientOptionalArgs(SslBundles sslBundles,
+            @Value("${app.tls.trust-bundle}") String trustBundle,
             EurekaClientHttpRequestFactorySupplier requestFactorySupplier,
             ObjectProvider<RestClient.Builder> restClientBuilder) {
         RestClientDiscoveryClientOptionalArgs args = new RestClientDiscoveryClientOptionalArgs(
                 requestFactorySupplier, () -> restClientBuilder.getIfAvailable(RestClient::builder));
-        args.setSSLContext(sslBundles.getBundle("trust").createSslContext());
+        args.setSSLContext(sslBundles.getBundle(trustBundle).createSslContext());
         return args;
     }
 }

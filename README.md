@@ -45,7 +45,7 @@ receiver).
 | [`order-service`](order-service/README.md)                                                     | 8082       | Eureka client                                                                                                                                       | `GET /api/orders`, `GET /api/orders/{id}`, `GET /api/orders/{id}/with-user` (calls `user-service` directly, load-balanced, no gateway) | https://localhost:8082/swagger-ui.html                                             |
 | [`product-service`](product-service/README.md)                                                 | 8083       | Eureka client                                                                                                                                       | `GET /api/products`, `GET /api/products/{id}`                                                                                          | https://localhost:8083/swagger-ui.html                                             |
 | [`gateway-service`](gateway-service/README.md)                                                 | 8080       | Eureka client + API gateway                                                                                                                         | routes `/api/users/**`, `/api/orders/**`, `/api/products/**` to the 3 services above via `lb://`                                       | http://localhost:8080/swagger-ui.html — aggregated, one dropdown entry per service |
-| [`admin-server`](admin-server/README.md)                                                       | 8084       | Spring Boot Admin — discovers instances via Eureka, dashboard at http://localhost:8084 (login `admin`/`admin`)                                      | —                                                                                                                                      | —                                                                                  |
+| [`admin-server`](admin-server/README.md)                                                       | 8084 (https) | Spring Boot Admin — discovers instances via Eureka, dashboard at https://localhost:8084 (login `admin`/`admin`)                                      | —                                                                                                                                      | —                                                                                  |
 | [`zipkin-server`](zipkin-server/README.md)                                                     | 9411       | Zipkin server (`@EnableZipkinServer`, own Spring Boot 3.5 build, no parent), Eureka client, takes OTLP at `/v1/traces`, UI at http://localhost:9411 | —                                                                                                                                      | —                                                                                  |
 
 Every module is secured with HTTP Basic, one shared user `admin`/`admin`
@@ -69,7 +69,7 @@ Swagger UI shows all three.
 ## <span style="color:hsl(118,80%,58%)">2. 🏗️ Parent / BOM chain</span>
 
 ```
-super-pom (com.org.llm:super-pom:1.2.1)   ← corporate parent (Boot 4.1.1, Java 27), imports learning-bom 3.1.0
+super-pom (com.org.llm:super-pom:1.2.2)   ← corporate parent (Boot 4.1.2, Java 27), imports learning-bom 3.1.1
   └── learning-spring-cloud (com.learning:learning-spring-cloud)  ← this repo's root pom, packaging=pom
         ├── eureka-server
         ├── admin-server
@@ -136,7 +136,7 @@ and pass `spring.datasource.*`, or use `spring-boot:run`.
   `USER-SERVICE`,
   `ORDER-SERVICE`, `PRODUCT-SERVICE`, `GATEWAY-SERVICE`, `ADMIN-SERVER` once all
   5 clients register (takes a few seconds after startup; heartbeats every 10 s).
-- **Spring Boot Admin dashboard**: http://localhost:8084 — same instances as
+- **Spring Boot Admin dashboard**: https://localhost:8084 — same instances as
   Eureka above (discovered via [`DiscoveryClient`][DiscoveryClient], not manually registered), but
   with drill-down per instance: health, `/env`, `/metrics`, `/loggers` (change
   log levels live), `/threaddump`, `/heapdump`, `/mappings`, `/beans`,
@@ -148,7 +148,7 @@ and pass `spring.datasource.*`, or use `spring-boot:run`.
     - https://localhost:8082/actuator/health
     - https://localhost:8083/actuator/health
     - http://localhost:8080/actuator/health
-    - http://localhost:8084/actuator/health
+    - https://localhost:8084/actuator/health
 - **Through the gateway** (resolves target service via Eureka, no hardcoded port):
   ```bash
   curl -u admin:admin http://localhost:8080/api/users
@@ -458,7 +458,7 @@ eureka:
 
 ## <span style="color:hsl(45,80%,55%)">9. 🔒 HTTPS between services (SSL bundles)</span>
 
-The registry, `order-service` and `product-service` serve ***HTTPS only***. Every call that reaches them — Eureka
+The registry, `order-service`, `product-service` and the Spring Boot Admin UI (`admin-server`) serve ***HTTPS only***. Every call that reaches them — Eureka
 registration, heartbeats and registry fetches from every module, peer replication between registry nodes, Spring Boot
 Admin polling, gateway routing — runs over TLS and verifies the server certificate against a private dev CA. All key
 and trust material is wired through Spring Boot ***SSL bundles*** (`spring.ssl.bundle.*`); where a library can't read
@@ -466,28 +466,30 @@ a bundle, a small bean hands it the bundle's `SSLContext`.
 
 | Caller → callee                                  | Scheme    | Who trusts the CA, and how                                                                                              |
 |--------------------------------------------------|-----------|-------------------------------------------------------------------------------------------------------------------------|
-| every Eureka client → `eureka-server` (8761–8763) | **https** | bundle `trust` → `RestClientDiscoveryClientOptionalArgs` ([`EurekaClientTlsConfig`](order-service/src/main/java/com/learning/discovery/order/config/EurekaClientTlsConfig.java), one per module) |
-| `eureka-server` → its peers (own client + replication) | **https** | bundle `trust` → `Jersey3DiscoveryClientOptionalArgs` + custom `PeerEurekaNodes` ([`EurekaTlsConfig`](eureka-server/src/main/java/com/learning/discovery/eureka/config/EurekaTlsConfig.java)) |
-| `admin-server` (SBA) → order, product, eureka actuators | **https** | bundle `trust` → `spring.http.clients.ssl.bundle` (Boot's `WebClient.Builder`, which SBA builds its `InstanceWebClient` from) |
-| `gateway-service` → order, product (`lb://`)      | **https** | bundle `trust` → `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle`                                         |
+| every Eureka client → `eureka-server` (8761–8763) | **https** | bundle `internal-ca` → `RestClientDiscoveryClientOptionalArgs` ([`EurekaClientTlsConfig`](order-service/src/main/java/com/learning/discovery/order/config/EurekaClientTlsConfig.java), one per module) |
+| `eureka-server` → its peers (own client + replication) | **https** | bundle `internal-ca` → `Jersey3DiscoveryClientOptionalArgs` + custom `PeerEurekaNodes` ([`EurekaTlsConfig`](eureka-server/src/main/java/com/learning/discovery/eureka/config/EurekaTlsConfig.java)) |
+| `admin-server` (SBA) → order, product, eureka, itself | **https** | bundle `internal-ca` → `spring.http.clients.ssl.bundle` (Boot's `WebClient.Builder`, which SBA builds its `InstanceWebClient` from) |
+| `gateway-service` → order, product (`lb://`)      | **https** | bundle `internal-ca` → `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle`                                         |
 | `zipkin-server` → `eureka-server`                 | **https** | JVM default trust store set from `tls/truststore.p12` at startup ([`DevCaTrust`](zipkin-server/src/main/java/com/learning/discovery/zipkin/DevCaTrust.java)) |
-| SBA / gateway → user-service, gateway, admin      | http      | unchanged: those three still serve plain HTTP                                                                           |
+| browser → SBA UI `:8084`                          | **https** | `server.ssl.bundle: ${app.tls.server-bundle}` (`service-identity`); import `certs/out/ca.crt` or click through   |
+| SBA / gateway → user-service, gateway             | http      | unchanged: those two still serve plain HTTP                                                                             |
 | `order-service` → `user-service` (`UserClient`)   | http      | unchanged                                                                                                                |
-| browser / curl → gateway `:8080`, SBA `:8084`     | http      | unchanged (edge TLS is a separate step, see the end of this section)                                                     |
+| browser / curl → gateway `:8080`                  | http      | unchanged (edge TLS is a separate step, see the end of this section)                                                     |
 
 ```mermaid
 flowchart LR
-    subgraph TLS["serve HTTPS (bundle: server)"]
+    subgraph TLS["serve HTTPS (bundle: service-identity)"]
         E1["eureka peer1 :8761"]
         E2["eureka peer2 :8762"]
         O["order-service :8082"]
         P["product-service :8083"]
+        A["admin-server :8084 (SBA UI)"]
     end
     U["user-service :8081"] -- "register / renew / fetch (https)" --> E1
     G["gateway :8080"] -- "register / fetch (https)" --> E2
     G -- "lb://ORDER-SERVICE → https://127.0.0.1:8082" --> O
     G -- "lb://PRODUCT-SERVICE → https" --> P
-    A["admin-server :8084"] -- "poll /actuator (https)" --> O
+    A -- "poll /actuator (https)" --> O
     A -- "poll /actuator (https)" --> P
     A -- "poll /actuator (https)" --> E1
     O -- "register / renew (https)" --> E1
@@ -514,44 +516,59 @@ Each step names what changed in this repo; in another project the same ten steps
    `localhost`, `127.0.0.1`, `127.0.0.2` (the three registry nodes; step 4 pins order/product to `127.0.0.1`).
    Hostname verification is on everywhere; a missing name fails with
    `No subject alternative names matching IP address 192.168.0.12 found`.
-2. ***Declare SSL bundles*** in each `application.yml` — `server` (key store) where the module serves TLS, `trust`
-   (trust store) where it calls TLS:
+2. ***Declare SSL bundles with self-describing names*** in each `application.yml` — `service-identity` (key store:
+   this process's certificate + key) where the module serves TLS, `internal-ca` (trust store: the CAs it trusts as a
+   client) where it calls TLS. A bundle is looked up ***by name***, so give it a name that says what it is, not who
+   uses it — any number of consumers (Tomcat, `WebClient`, the gateway's Netty client, your own beans) can then share
+   the same one:
 
    ```yaml
    spring:
      ssl:
        bundle:
          jks:
-           server:
+           service-identity:
              key:
                alias: server
              keystore:
                location: classpath:tls/server.p12
                password: ${TLS_KEYSTORE_PASSWORD:changeit}
                type: PKCS12
-           trust:
+           internal-ca:
              truststore:
                location: classpath:tls/truststore.p12
                password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
                type: PKCS12
    ```
-3. ***Serve HTTPS*** (eureka-server, order-service, product-service) — one line; the port stays the same and stops
-   speaking plain HTTP (an `http://` request gets `400 Bad Request`):
+   ***Declare each name once and reference it everywhere*** — YAML keys can't contain placeholders, so the name
+   appears once as the bundle key above and once under `app.tls`; every consumer — YAML or Java — reads `app.tls.*`,
+   so renaming a bundle (or pointing a module at a different one, e.g. a production `prod-ca`) is a two-line change:
+
+   ```yaml
+   app:
+     tls:
+       server-bundle: service-identity   # modules that serve TLS
+       trust-bundle: internal-ca          # every module that calls TLS
+   ```
+
+3. ***Serve HTTPS*** (eureka-server, order-service, product-service, admin-server) — one line; the port stays the
+   same and stops speaking plain HTTP (Tomcat answers `http://` with `400 Bad Request`; Netty in admin-server just
+   closes the connection):
 
    ```yaml
    server:
      ssl:
-       bundle: server
+       bundle: ${app.tls.server-bundle}
    ```
 4. ***Advertise HTTPS in the registry*** — callers never see `server.ssl`; they build URLs from the `InstanceInfo`
-   in Eureka. order/product (and the registry nodes, so SBA polls them over TLS) register:
+   in Eureka. order/product/admin (and the registry nodes, so SBA polls them over TLS) register:
 
    ```yaml
    eureka:
      instance:
        secure-port-enabled: true        # securePort = server.port; isSecure() → https:// URIs
        non-secure-port-enabled: false
-       ip-address: ${EUREKA_INSTANCE_IP:127.0.0.1}   # order/product only: a host that is in the SAN
+       ip-address: ${EUREKA_INSTANCE_IP:127.0.0.1}   # order/product/admin: a host that is in the SAN
    ```
 
    With `secure-port-enabled`, Spring Cloud also publishes `secureHealthCheckUrl` (`https://…/actuator/health`), which
@@ -568,11 +585,12 @@ Each step names what changed in this repo; in another project the same ten steps
    ```java
    @Bean
    RestClientDiscoveryClientOptionalArgs restClientDiscoveryClientOptionalArgs(SslBundles sslBundles,
+           @Value("${app.tls.trust-bundle}") String trustBundle,
            EurekaClientHttpRequestFactorySupplier requestFactorySupplier,
            ObjectProvider<RestClient.Builder> restClientBuilder) {
        var args = new RestClientDiscoveryClientOptionalArgs(requestFactorySupplier,
                () -> restClientBuilder.getIfAvailable(RestClient::builder));
-       args.setSSLContext(sslBundles.getBundle("trust").createSslContext());
+       args.setSSLContext(sslBundles.getBundle(trustBundle).createSslContext());
        return args;                  // the auto-configured one backs off (@ConditionalOnMissingBean)
    }
    ```
@@ -589,10 +607,10 @@ Each step names what changed in this repo; in another project the same ten steps
    longer re-read on `/actuator/refresh`; the 10-minute peer-list update still runs. Details in the
    [eureka-server README](eureka-server/README.md#https).
 8. ***Every other caller of a TLS service***:
-   - ***gateway*** — `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle: trust`. The load-balancer
+   - ***gateway*** — `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle: ${app.tls.trust-bundle}`. The load-balancer
      filter picks `https` itself (`LoadBalancerUriTools.reconstructURI` uses `ServiceInstance.isSecure()`), so routes
      stay `lb://ORDER-SERVICE`.
-   - ***Spring Boot Admin*** — `spring.http.clients.ssl.bundle: trust`. SBA's `AdminServerInstanceWebClientConfiguration`
+   - ***Spring Boot Admin*** — `spring.http.clients.ssl.bundle: ${app.tls.trust-bundle}`. SBA's `AdminServerInstanceWebClientConfiguration`
      builds `InstanceWebClient` from Boot's `WebClient.Builder`, whose connector gets the bundle. Covers status polling,
      endpoint detection, info, and every proxied detail view. Details in the
      [admin-server README](admin-server/README.md#https).
@@ -600,10 +618,10 @@ Each step names what changed in this repo; in another project the same ten steps
      `EurekaUpdatingListener` has no TLS setting). [`DevCaTrust`](zipkin-server/src/main/java/com/learning/discovery/zipkin/DevCaTrust.java)
      copies `tls/truststore.p12` to a temp file and sets `javax.net.ssl.trustStore` before Zipkin starts; Netty's TLS
      client falls back to the JDK default trust managers, which read it.
-9. ***Tests*** — the integration tests call the embedded server over plain HTTP, so order/product
+9. ***Tests*** — the integration tests call the embedded server over plain HTTP, so order/product/admin
    `application-test.yml` and `EurekaServerApplicationTests` set `server.ssl.enabled: false`.
    [`EurekaTlsTests`](eureka-server/src/test/java/com/learning/discovery/eureka/EurekaTlsTests.java) keeps TLS on and
-   checks that a client trusting the `trust` bundle gets `200` from `https://localhost:<port>/eureka/apps`, that the
+   checks that a client trusting the `internal-ca` bundle gets `200` from `https://localhost:<port>/eureka/apps`, that the
    JDK's default trust store gets an `SSLHandshakeException`, and that the TLS-aware `PeerEurekaNodes` is in place.
 10. ***Verify***:
 
@@ -625,7 +643,7 @@ Each step names what changed in this repo; in another project the same ten steps
 - ***Browsers warn on the dashboards*** (`https://localhost:8761`, Swagger UI on 8082/8083) until you import
   `certs/out/ca.crt` as a trusted authority, or click through.
 - ***`PKIX path building failed` / `unable to find valid certification path`*** — the caller doesn't trust the CA:
-  missing `trust` bundle, stale `truststore.p12` after rerunning the script (it creates a new CA; rebuild and restart
+  missing `internal-ca` bundle, stale `truststore.p12` after rerunning the script (it creates a new CA; rebuild and restart
   everything), or a caller that bypasses the bundle (step 6–8).
 - ***`No subject alternative names matching …`*** — the URL host isn't in the SAN: usually an instance that registered
   its LAN IP. Set `eureka.instance.ip-address`, or regenerate with `EXTRA_SAN`.
@@ -645,9 +663,9 @@ Each step names what changed in this repo; in another project the same ten steps
 
 ### Beyond this demo
 
-- ***Edge TLS*** — gateway and SBA still listen on plain HTTP; add `server.ssl.bundle` to them (and `https` to the
-  SBA/gateway registrations) the same way.
-- ***Mutual TLS*** — add a key store to the `trust` bundle on callers and `server.ssl.client-auth: need` plus a
+- ***Edge TLS*** — the gateway (and user-service) still listen on plain HTTP; give them a `service-identity` bundle,
+  `server.ssl.bundle: ${app.tls.server-bundle}` and a secure registration the same way admin-server got one.
+- ***Mutual TLS*** — add a key store to the `internal-ca` bundle on callers and `server.ssl.client-auth: need` plus a
   trust store on servers; then a stolen Basic credential alone no longer reaches the registry or actuators.
 - ***Real certificates*** — in Kubernetes, cert-manager (or a service mesh doing mTLS transparently) replaces the
   script; in a VM fleet, an internal CA (Vault PKI, ACME) with short-lived certs plus `reload-on-update`.

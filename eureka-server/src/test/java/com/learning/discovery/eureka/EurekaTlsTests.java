@@ -3,6 +3,7 @@ package com.learning.discovery.eureka;
 import com.netflix.eureka.cluster.PeerEurekaNodes;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ssl.SslBundles;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -18,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * The node serves HTTPS with the "server" bundle, a client trusting the "trust" bundle (the dev CA) can call it,
+ * The node serves HTTPS with the app.tls.server-bundle bundle, a client trusting app.tls.trust-bundle (the dev CA) can call it,
  * and a client with only the JDK's default trust store can't.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -31,13 +32,16 @@ class EurekaTlsTests {
     @Autowired
     private SslBundles sslBundles;
 
+    @Value("${app.tls.trust-bundle}")
+    private String trustBundle;
+
     @Autowired
     private PeerEurekaNodes peerEurekaNodes;
 
     @Test
     void registryApiIsServedOverHttpsToClientsTrustingTheDevCa() throws Exception {
         HttpClient client = HttpClient.newBuilder()
-                .sslContext(sslBundles.getBundle("trust").createSslContext())
+                .sslContext(sslBundles.getBundle(trustBundle).createSslContext())
                 .build();
         HttpRequest request = HttpRequest.newBuilder(URI.create("https://localhost:" + port + "/eureka/apps"))
                 .header("Authorization", "Basic " + Base64.getEncoder().encodeToString("admin:admin".getBytes()))

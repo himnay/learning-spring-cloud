@@ -2,7 +2,7 @@ server:
   port: 8082
   shutdown: graceful   # Boot 3.4+ default, explicit here: finish in-flight requests (max spring.lifecycle.timeout-per-shutdown-phase, 30 s) before stopping
   ssl:
-    bundle: server   # HTTPS only on this port; plain http:// requests get a 400
+    bundle: ${app.tls.server-bundle}   # HTTPS only on this port; plain http:// requests get a 400
 
 spring:
   application:
@@ -10,14 +10,14 @@ spring:
   ssl:
     bundle: # spring.ssl.bundle.jks.<name>: TLS material by name; certs/generate-certs.sh writes src/main/resources/tls/
       jks:
-        server: # this process's certificate + private key; Tomcat serves HTTPS with it (server.ssl.bundle)
+        service-identity: # this process's certificate + private key; Tomcat serves HTTPS with it (server.ssl.bundle)
           key:
             alias: server
           keystore:
             location: classpath:tls/server.p12
             password: ${TLS_KEYSTORE_PASSWORD:changeit}
             type: PKCS12
-        trust: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig)
+        internal-ca: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig)
           truststore:
             location: classpath:tls/truststore.p12
             password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
@@ -51,6 +51,9 @@ orders:
     refresh-interval: 5m   # OrderCacheRefresher reloads the cache from Postgres at this rate
 
 app:
+  tls: # SSL bundle names, declared once here; server.ssl, HTTP clients and the Eureka TLS beans all reference these
+    server-bundle: service-identity   # spring.ssl.bundle.jks.service-identity: this process's certificate + key
+    trust-bundle: internal-ca         # spring.ssl.bundle.jks.internal-ca: CA this process trusts as a client
   security:
     public-paths: # reachable without auth; everything else needs Basic/form login
       - "/actuator/health/**"

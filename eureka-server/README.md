@@ -8,8 +8,25 @@
 4. 🔒 [HTTPS](#https)
 5. 📊 [Actuator endpoints and SBA views](#actuator-endpoints)
 6. ⏱️ [Quartz demo job, file logging, configuration](#quartz-logging-config)
-7. 🔬 [Internals: eureka-core 2.0.6](#eureka-core-internals) — packages, design, lease maths, register/replicate/read sequence, conflicts, startup, self-preservation, response cache, replication engine, tunables
-8. 🔬 [Internals: eureka-client 2.0.6](#eureka-client-internals) — design, transport decorators, timers, register/heartbeat/fetch sequence, TLS hooks
+7. 🔬 [Internals: eureka-core 2.0.6](#eureka-core-internals)
+    - 7.1 [Package map](#core-1)
+    - 7.2 [Design](#core-2)
+    - 7.3 [Lease and timing](#core-3)
+    - 7.4 [Register, replicate, read — sequence](#core-4)
+    - 7.5 [Heartbeat and conflict resolution](#core-5)
+    - 7.6 [Startup, sync and `shouldAllowAccess`](#core-6)
+    - 7.7 [Self-preservation, the formula](#core-7)
+    - 7.8 [Response cache](#core-8)
+    - 7.9 [Replication engine](#core-9)
+    - 7.10 [Tunables (Spring property → default → here)](#core-10)
+    - 7.11 [Design patterns and principles in eureka-core](#core-11)
+    - 7.12 [Tech stack: how Eureka and its dashboard are built](#core-12)
+8. 🔬 [Internals: eureka-client 2.0.6](#eureka-client-internals)
+    - 8.1 [Design](#client-1)
+    - 8.2 [Threads and timers](#client-2)
+    - 8.3 [Start, register, heartbeat, fetch — sequence](#client-3)
+    - 8.4 [Where the TLS hooks sit](#client-4)
+    - 8.5 [Design patterns and principles](#client-5)
 9. 🧪 [Tests](#tests)
 10. ⚠️ [Gotchas](#gotchas)
 11. ❓ [Q&A](#qa)
@@ -35,7 +52,7 @@ AP/CAP, self-preservation and eviction timing, see the [root README](../README.m
 | Role                                | Netflix Eureka ***service registry*** + dashboard                                                                                                                                                                                         |
 | Port                                | `8761` / `8762` / `8763` for profile `peer1` / `peer2` / `peer3` ([`application.yml`](src/main/resources/application.yml) `server.port`)                                                                                                  |
 | Web stack                           | Servlet (Spring MVC / Tomcat)                                                                                                                                                                                                             |
-| Stack (as of 2026)                  | Spring Boot 4.1.1, Spring Cloud 2025.1.x (banner says 2025.1.2), Java 27                                                                                                                                                                  |
+| Stack (as of 2026)                  | Spring Boot 4.1.2, Spring Cloud 2025.1.x (banner says 2025.1.2), Java 27                                                                                                                                                                  |
 | Main class                          | [`EurekaServerApplication`](src/main/java/com/learning/discovery/eureka/EurekaServerApplication.java) — `@EnableEurekaServer` + `@SpringBootApplication`                                                                                  |
 | Dependencies ([`pom.xml`](pom.xml)) | `spring-cloud-starter-netflix-eureka-server`, `spring-boot-starter-actuator`, `spring-boot-starter-security`, `spring-boot-starter-quartz`, `jolokia-support-springboot` 2.6.3; tests: `spring-boot-starter-test`, `spring-security-test` |
 
@@ -69,7 +86,7 @@ AP/CAP, self-preservation and eviction timing, see the [root README](../README.m
 - ***Hostname*** — `peer1` is `localhost`, `peer2` `127.0.0.1`, `peer3` `127.0.0.2`: nodes need distinct hostnames,
   and all three are loopback without an `/etc/hosts` entry. Linux and Windows route all of `127.0.0.0/8` to loopback;
   on macOS run `sudo ifconfig lo0 alias 127.0.0.2` once before starting `peer3`.
-- ***HTTPS only*** — every node serves TLS with the `server` SSL bundle, registers as secure, and replicates to its
+- ***HTTPS only*** — every node serves TLS with the `service-identity` SSL bundle, registers as secure, and replicates to its
   peers over TLS; clients use `https://` in `defaultZone`. Run `./certs/generate-certs.sh` once before the first build
   ([§4](#https), root [§9](../README.md#https)).
 - ***Startup banner*** — [`banner.txt`](src/main/resources/banner.txt) prints project metadata and the dashboard URL.
@@ -225,13 +242,13 @@ sequenceDiagram
 
 ## <span style="color:hsl(45,80%,55%)">4. 🔒 HTTPS</span>
 
-Every node serves ***HTTPS only*** on its port (`server.ssl.bundle: server`), registers itself as secure
+Every node serves ***HTTPS only*** on its port (`server.ssl.bundle: ${app.tls.server-bundle}` → `service-identity`), registers itself as secure
 (`secure-port-enabled: true`, `non-secure-port-enabled: false`) and talks to its peers over TLS. The step-by-step
 conversion for the whole stack is in the root [§9](../README.md#https); this is the registry's part.
 
-| Path                                   | Client library                                   | How it gets the `trust` bundle                                                         |
+| Path                                   | Client library                                   | How it gets the `internal-ca` bundle                                                        |
 |----------------------------------------|--------------------------------------------------|----------------------------------------------------------------------------------------|
-| Inbound: clients, peers, SBA, browser  | Tomcat                                           | `server.ssl.bundle: server` (`tls/server.p12`, SAN `localhost`, `127.0.0.1`, `127.0.0.2`) |
+| Inbound: clients, peers, SBA, browser  | Tomcat                                           | `service-identity` bundle (`tls/server.p12`, SAN `localhost`, `127.0.0.1`, `127.0.0.2`) |
 | Own Eureka client → peers (register, fetch) | Jersey 3 (`Jersey3TransportClientFactories`) | `Jersey3DiscoveryClientOptionalArgs.setSSLContext(...)` in [`EurekaTlsConfig`](src/main/java/com/learning/discovery/eureka/config/EurekaTlsConfig.java) |
 | Peer replication (`/eureka/peerreplication/batch`) | Jersey 3 + Apache HttpClient 4 (`Jersey3ReplicationClient`) | custom `PeerEurekaNodes` (`TlsPeerEurekaNodes`) in the same class                |
 
@@ -251,7 +268,7 @@ conversion for the whole stack is in the root [§9](../README.md#https); this is
 - ***Tests*** — [`EurekaServerApplicationTests`](src/test/java/com/learning/discovery/eureka/EurekaServerApplicationTests.java)
   runs with `server.ssl.enabled=false` (plain `RestTestClient`);
   [`EurekaTlsTests`](src/test/java/com/learning/discovery/eureka/EurekaTlsTests.java) keeps TLS on: `200` with the
-  `trust` bundle, `SSLHandshakeException` with the JDK default trust store, and `TlsPeerEurekaNodes` in place.
+  `internal-ca` bundle, `SSLHandshakeException` with the JDK default trust store, and `TlsPeerEurekaNodes` in place.
 - ***Verify replication over TLS*** — register anything with one node and read it from another:
   `curl --cacert certs/out/ca.crt -u admin:admin -H 'Accept: application/json' https://127.0.0.1:8762/eureka/apps`.
   A node whose peer is down logs `Network level connection to peer 127.0.0.2; retrying after delay`; a trust problem
@@ -383,6 +400,8 @@ eureka.instance.hostname: 127.0.0.2
 (Spring Cloud 2025.1) only boots it inside Spring and swaps a few beans. Everything below was read from the 2.0.6
 sources (`eureka-core`, `eureka-core-jersey3`) and Spring Cloud Netflix 5.0.2.
 
+<a id="core-1"></a>
+
 ### 7.1 Package map
 
 | Package                         | Key types                                                                                                   | Job                                                                       |
@@ -396,6 +415,8 @@ sources (`eureka-core`, `eureka-core-jersey3`) and Spring Cloud Netflix 5.0.2.
 | `…eureka.resources`             | `ApplicationsResource`, `ApplicationResource`, `InstanceResource`, `PeerReplicationResource`, `ServerCodecs` | the JAX-RS (Jersey) REST API under `/eureka`                               |
 | `…eureka.transport` (jersey3)   | `Jersey3ReplicationClient`, `Jersey3DynamicGZIPContentEncodingFilter`                                       | HTTP client for replication                                                |
 | `…eureka.aws`                   | `EIPManager`, `Route53Binder`, `AwsAsgUtil`                                                                 | AWS-only (EIP/ASG binding); unused here                                    |
+
+<a id="core-2"></a>
 
 ### 7.2 Design
 
@@ -482,6 +503,8 @@ classDiagram
   `EurekaInstanceRegisteredEvent` / `RenewedEvent` / `CanceledEvent` as Spring events and opens for traffic with a
   count of at least 1 (`defaultOpenForTrafficCount`), so a lone node doesn't refuse reads for 5 minutes (7.6).
 
+<a id="core-3"></a>
+
 ### 7.3 Lease and timing
 
 ```text
@@ -497,6 +520,8 @@ isExpired: evictionTimestamp > 0 || now > lastUpdateTimestamp + duration + addit
 - ***`EvictionTask`*** — a `java.util.Timer` (`Eureka-EvictionTimer`) every `eviction-interval-timer-in-ms` (30 s
   here). It computes a ***compensation*** for its own lateness (GC pause, clock drift) and calls
   `evict(compensationMs)`, so a long pause doesn't instantly expire everyone.
+
+<a id="core-4"></a>
 
 ### 7.4 Register, replicate, read — sequence
 
@@ -537,6 +562,8 @@ sequenceDiagram
     R1-->>C: 200 delta + appsHashCode
 ```
 
+<a id="core-5"></a>
+
 ### 7.5 Heartbeat and conflict resolution
 
 `PUT /eureka/apps/{APP}/{id}?status=UP&lastDirtyTimestamp=…` → `InstanceResource.renewLease`:
@@ -551,6 +578,8 @@ sequenceDiagram
 
 This is the whole consistency model: no consensus, ***last-dirty-timestamp wins***, and repair rides on the next
 heartbeat (the AP choice in the root [FAQ 12.6](../README.md#faq-eureka-ap)).
+
+<a id="core-6"></a>
 
 ### 7.6 Startup, sync and `shouldAllowAccess`
 
@@ -583,6 +612,8 @@ sequenceDiagram
 - ***Renewal threshold refresh*** — besides the +1/−1 on every register/cancel, a timer recomputes the expected
   client count from the registry size every `renewal-threshold-update-interval-ms` (15 min).
 
+<a id="core-7"></a>
+
 ### 7.7 Self-preservation, the formula
 
 ```text
@@ -602,6 +633,8 @@ evictionLimit                 = registrySize − (int)(registrySize × renewal-p
   `lease-renewal-interval-in-seconds` (both 10 here); with the default 30 the threshold is a third of reality and
   self-preservation never trips.
 
+<a id="core-8"></a>
+
 ### 7.8 Response cache
 
 | Layer               | Type                                    | Filled by                                  | Expires / refreshes                                         |
@@ -614,6 +647,8 @@ evictionLimit                 = registrySize − (int)(registrySize × renewal-p
 - ***Writes don't reach readers immediately*** — invalidation clears only `readWriteCacheMap`; readers hit
   `readOnlyCacheMap` until the next 30 s copy. With `use-read-only-response-cache: false` reads go straight to the
   read-write cache (fresher, more payload generation under load).
+
+<a id="core-9"></a>
 
 ### 7.9 Replication engine
 
@@ -634,6 +669,8 @@ flowchart LR
 - ***Bounded and lossy by design*** — at most `max-elements-in-peer-replication-pool` (10,000) pending tasks per peer
   (overflow is counted and dropped); register/heartbeat tasks expire after one lease, others after
   `max-time-for-replication` (30 s). A lost replication is repaired by the next heartbeat's `404` → re-register.
+
+<a id="core-10"></a>
 
 ### 7.10 Tunables (Spring property → default → here)
 
@@ -658,6 +695,70 @@ flowchart LR
 | `max-time-for-replication`                     | `30000`                | default       | non-lease task expiry                          |
 | `peer-eureka-nodes-update-interval-ms`         | `600000`               | default       | peer list refresh                              |
 
+<a id="core-11"></a>
+
+### 7.11 Design patterns and principles in eureka-core
+
+| Pattern / principle | Where (eureka-core 2.0.6) | What it buys |
+|---|---|---|
+| ***Lease*** (time-bound ownership) | `Lease<T>` + `LeaseManager<T>`; `AbstractInstanceRegistry.register/renew/cancel/evict` | liveness without a failure detector: an entry lives only while its owner keeps renewing; silence = expiry ([7.3](#core-3)) |
+| ***Template Method*** | `PeerEurekaNodes.createPeerEurekaNode(url)` is abstract; `start()`/`updatePeerEurekaNodes()` fixed. `AbstractInstanceRegistry` → `PeerAwareInstanceRegistryImpl` → Spring's `InstanceRegistry` override hooks (`register`, `openForTraffic`) | Spring Cloud plugs in `RefreshablePeerEurekaNodes`, this repo `TlsPeerEurekaNodes`, without touching the peer lifecycle |
+| ***Composite + Chain of Responsibility*** | `FirstMatchWinsCompositeRule(DownOrStartingRule, OverrideExistsRule, LeaseExistsRule)` over `InstanceStatusOverrideRule`; the first rule that `matches()` decides | status resolution as small, ordered, testable rules instead of one `if` ladder |
+| ***Strategy*** | `InstanceStatusOverrideRule`, `ServerCodecs` / `CodecWrappers` (JSON, XML, compact), `EurekaServerConfig` implementations (`DefaultEurekaServerConfig`, Spring's `EurekaServerConfigBean`) | swap serialization or config source without changing the registry |
+| ***Command*** | `ReplicationTask` / `InstanceReplicationTask` (one register/heartbeat/cancel/status action, with `execute()` and `handleFailure()`) wrapped in `TaskHolder` with an expiry | replication actions become data: queued, batched, retried, expired, overridden |
+| ***Producer–consumer + batching (Acceptor/Worker)*** | `TaskDispatchers` → `AcceptorExecutor` (acceptor thread, `pendingTasks`, `reprocessQueue`) → `TaskExecutors` worker pool → `TaskProcessor` | request threads never block on peers; replication cost is amortized (≤ 250 tasks per HTTP call) ([7.9](#core-9)) |
+| ***Coalescing / last-write-wins in the queue*** | `AcceptorExecutor.pendingTasks` keyed by task id (`heartbeat#APP/id`): a newer task replaces the queued one (`overriddenTasks` metric) | 10 queued heartbeats for one instance cost one HTTP item |
+| ***Backpressure + adaptive retry*** | bounded queues (`max-elements-in-peer-replication-pool`, `queueOverflows`), `TrafficShaper` delays after `Congestion` (1 s) / `TransientError` (100 ms) | a slow or dead peer doesn't exhaust memory or hot-loop |
+| ***Two-level cache (read-through + periodic snapshot)*** | `ResponseCacheImpl`: Guava `LoadingCache` (read-through, `generatePayload`) + `readOnlyCacheMap` refreshed by a timer | reads never touch the registry lock under load; trades up to 30 s freshness ([7.8](#core-8)) |
+| ***Event log for deltas*** | `recentlyChangedQueue` + `DeltaRetentionTask` (3 min retention); `getApplicationDeltas()` | clients pull only changes, not the whole registry |
+| ***Checksum reconciliation (anti-entropy lite)*** | `appsHashCode` (`UP_8_DOWN_1_`) shipped with every delta | cheap drift detection; a mismatch triggers one full fetch instead of trusting a broken delta stream |
+| ***Optimistic, last-writer-wins conflict resolution*** | `lastDirtyTimestamp` compare in `AbstractInstanceRegistry.register` and `InstanceResource.validateDirtyTimestamp` (`404` / `409` + body) | no locks or consensus between nodes; the newest copy of an `InstanceInfo` wins and repair rides on heartbeats ([7.5](#core-5)) |
+| ***Reader–writer lock, inverted*** | writers take the ***read*** lock, `getApplicationDeltas()` the ***write*** lock (`AbstractInstanceRegistry`) | many concurrent writers on concurrent maps; one consistent snapshot for the delta read |
+| ***Circuit breaker on eviction (self-preservation)*** | `PeerAwareInstanceRegistryImpl.isLeaseExpirationEnabled()` vs `numberOfRenewsPerMinThreshold`; eviction cap + randomized victims in `evict()` | a network partition can't empty the registry; fail ***open*** (stale data) rather than closed (no data) ([7.7](#core-7)) |
+| ***Self-timing compensation*** | `EvictionTask.getCompensationTimeMs()` | a GC pause or clock jump doesn't look like everyone missing heartbeats |
+| ***Sliding-window metric*** | `MeasuredRate` (current/last minute buckets) for `renewsLastMin` | O(1) rate tracking driving self-preservation |
+| ***Facade / context object*** | `EurekaServerContext` (`DefaultEurekaServerContext`) bundles config, codecs, registry, peer nodes; `EurekaServerContextHolder` (static holder) for code outside DI | one entry point for resources and bootstrapping |
+| ***Idempotent REST operations*** | register = `POST` of the full `InstanceInfo` (replaces), renew = `PUT`, cancel = `DELETE`; replication flag `x-netflix-discovery-replication` stops echo loops | safe retries on any node, safe replays from the replication queue |
+
+***Principles behind the code***
+
+- ***AP over CP*** (CAP) — every node accepts writes and serves reads alone; consistency is eventual, by
+  replication plus heartbeat repair. Root [FAQ 12.6](../README.md#faq-eureka-ap).
+- ***Fail open, degrade gracefully*** — self-preservation, client caches, `404 → re-register`: when unsure, keep
+  serving the last known state.
+- ***Server is dumb, client is smart*** — the registry stores and serves; load balancing, caching, retries and
+  failover live in the client (section 8). That keeps the server horizontally simple.
+- ***Push work off the request path*** — replication, cache refresh, eviction and delta cleanup all run on timers or
+  worker pools; a client request only touches in-memory maps.
+- ***Bulkheads per peer*** — each `PeerEurekaNode` has its own dispatchers, queues and worker threads, so one slow
+  peer doesn't stall replication to the others.
+
+<a id="core-12"></a>
+
+### 7.12 Tech stack: how Eureka and its dashboard are built
+
+Read from the published POMs/jars (eureka 2.0.6, Spring Cloud Netflix 5.0.3). Two layers, built by two projects:
+
+| Layer | Built with | Notes |
+|---|---|---|
+| ***Netflix Eureka*** (`eureka-core`, `eureka-client`, `*-jersey3`) | Java, ***Gradle*** (POMs carry Gradle module metadata) | plain Java library, no Spring |
+| REST API (`/eureka/apps`, `/peerreplication`) | ***Jersey 3*** (JAX-RS, `jakarta.ws.rs`) + HK2 injection, on the Jakarta Servlet API | `ApplicationsResource`, `InstanceResource`, … ([7.1](#core-1)) |
+| Serialization | ***Jackson*** (JSON; XML via `jackson-dataformat-xml` + Woodstox), ***XStream*** (legacy codecs), `CodecWrappers` | `full` vs `compact` payloads |
+| HTTP client | Apache ***HttpClient 4*** via `jersey-apache-connector` (Netflix transport, peer replication) | Spring Cloud swaps clients to Apache ***HttpClient 5*** via `RestClient` ([8.1](#client-1)) |
+| Caching / collections | ***Guava*** (`LoadingCache` in `ResponseCacheImpl`, override-status cache), `compactmap` | |
+| Configuration | ***Archaius 1*** + Apache Commons Configuration (client side) | Spring Cloud replaces it with `@ConfigurationProperties` beans (`EurekaClientConfigBean`, `EurekaServerConfigBean`) |
+| Metrics | ***Spectator*** (`SpectatorUtil`, replication/registry gauges) | |
+| Cloud integration | AWS SDK v1 (EC2, Auto Scaling, Route 53, STS) | EIP/ASG/DNS binding; unused here |
+| ***Spring Cloud Netflix*** (`spring-cloud-netflix-eureka-server` / `-client`) | Java, Maven, Spring Boot auto-configuration | `EurekaServerAutoConfiguration`, `EurekaClientAutoConfiguration` |
+| Embedding the server | Spring MVC + the Jersey `ServletContainer` registered as a filter on `/eureka/*` | one Tomcat serves the REST API, the dashboard and actuator |
+| ***Dashboard*** (`/`, `/lastn`) | Spring MVC `EurekaController` + ***FreeMarker*** templates (`templates/eureka/status.ftlh`, `navbar.ftlh`, `header.ftlh`, `lastn.ftlh`; `spring-boot-starter-freemarker`) | server-side rendered HTML, no JavaScript application |
+| Dashboard styling | ***Bootstrap 5.1.3*** CSS/JS pre-bundled as `static/eureka/css/wro.css` and `js/wro.js` (wro4j-style bundles), Montserrat + Varela Round web fonts, Spring logo images | refreshed by reloading the page; nothing polls |
+
+- ***What that means here*** — the dashboard is a page rendered from the registry on each request (so it is as
+  fresh as the node's own registry, not its 30 s response cache), protected by this module's Spring Security form
+  login, and served over TLS like everything else on the port ([§4](#https)). Customizing it means overriding the
+  FreeMarker templates on the classpath (`templates/eureka/*.ftlh`); there is no plugin API like SBA's.
+
 <a id="eureka-client-internals"></a>
 
 ## <span style="color:hsl(190,70%,50%)">8. 🔬 Internals: eureka-client 2.0.6</span>
@@ -665,6 +766,8 @@ flowchart LR
 Every module except this one talks to the registry through `com.netflix.discovery.DiscoveryClient` (eureka-client
 2.0.6), created by Spring Cloud Netflix 5.0.2 as `CloudEurekaClient`. On the server classpath the same client runs
 inside each registry node (Jersey transport) to register it and to feed `syncUp()`.
+
+<a id="client-1"></a>
 
 ### 8.1 Design
 
@@ -744,6 +847,8 @@ classDiagram
   - The transport is `RestClientEurekaHttpClient` here (Apache HttpClient 5 with the bundle's `SSLContext`, see
     [§4](#https) and root [§9 step 6](../README.md#https)); Jersey on the registry nodes.
 
+<a id="client-2"></a>
+
 ### 8.2 Threads and timers
 
 | Task                            | Thread / executor                                   | Period (property, default → here)                                         | Backoff                                    |
@@ -756,6 +861,8 @@ classDiagram
 `TimedSupervisorTask` runs the task with a timeout equal to its period; on timeout or rejection it doubles the next
 delay up to `period × bound`, and resets to the period after the next success — a slow registry slows clients down
 instead of piling up threads.
+
+<a id="client-3"></a>
 
 ### 8.3 Start, register, heartbeat, fetch — sequence
 
@@ -816,6 +923,8 @@ sequenceDiagram
 - ***Why callers see a dead instance for minutes*** — registry eviction (~60–90 s, 10.3) + read-only cache (30 s) +
   client fetch (30 s) + LoadBalancer cache (35 s): Q&A [11.2](#qa-crash-eviction-timeline) has the full timeline.
 
+<a id="client-4"></a>
+
 ### 8.4 Where the TLS hooks sit
 
 | Hook                                   | Who reads it                                          | Used here                                                       |
@@ -824,6 +933,36 @@ sequenceDiagram
 | `eureka.client.tls.*` (key/trust-store files) | Spring Cloud `SSLContextFactory` → same optional args | — (replaced by the SSL bundle)                                   |
 | `EurekaClientHttpRequestFactorySupplier` bean | `RestClientTransportClientFactory` (builds the HttpClient 5 request factory) | — (default; receives the `SSLContext`)                 |
 | `spring.http.clients.ssl.bundle`       | Boot's `RestClient.Builder` / `WebClient.Builder`      | — for Eureka (its request factory is replaced); ✅ for SBA        |
+
+<a id="client-5"></a>
+
+### 8.5 Design patterns and principles in eureka-client
+
+| Pattern / principle | Where (eureka-client 2.0.6) | What it buys |
+|---|---|---|
+| ***Decorator*** | `EurekaHttpClientDecorator` subclasses stacked by `EurekaHttpClients.canonicalClientFactory`: `SessionedEurekaHttpClient` → `RetryableEurekaHttpClient` → `RedirectingEurekaHttpClient` → transport (+ `MetricsCollectingEurekaHttpClient` on Jersey) | session rotation, failover, redirects and metrics composed as layers around one `EurekaHttpClient` interface |
+| ***Command (inside the decorator)*** | `EurekaHttpClientDecorator.RequestExecutor<R>` — each operation (`register`, `sendHeartBeat`, `getApplications`, …) is wrapped once and replayed by `execute(requestExecutor)` against the next delegate | one retry/redirect implementation for all ten operations |
+| ***Factory / Abstract Factory*** | `TransportClientFactories` → `TransportClientFactory` (`newClient(endpoint)`), `EurekaHttpClientFactory`, Spring's `RestClientTransportClientFactories` / `WebClientTransportClientFactories` | transport (Jersey, RestClient, WebClient) chosen at wiring time; the TLS `SSLContext` flows through the factory ([4](#https)) |
+| ***Strategy*** | `ClusterResolver` (`ZoneAffinityClusterResolver`, config/DNS resolvers), `EndpointRandomizer`, `ServerStatusEvaluator`, `HealthCheckHandler`, `BackupRegistry` | where the servers are, which status codes are retryable, how health maps to `UP/DOWN`, what to load when every server is down |
+| ***Observer*** | `ApplicationInfoManager.StatusChangeListener` (status → on-demand re-register); `EurekaEventListener` + `CacheRefreshedEvent` / `StatusChangeEvent`; Spring's `CloudEurekaClient` turns refreshes into `HeartbeatEvent` (SBA listens) | registration and discovery react to state changes without polling each other |
+| ***Copy-on-write snapshot*** | `AtomicReference<Applications> localRegionApps`: fetches build a new filtered/shuffled `Applications` and swap it in | lock-free reads for every `getInstances()` caller (LoadBalancer, SBA) |
+| ***Optimistic concurrency (CAS generation)*** | `fetchRegistryGeneration.compareAndSet(...)` in `getAndStoreFullRegistry` / `getAndUpdateDelta` | a slow fetch can't overwrite a newer one that finished first |
+| ***Supervisor with exponential backoff*** | `TimedSupervisorTask` (timeout = period, delay doubles up to `period × bound`, resets on success) | a struggling registry gets fewer calls, and client threads never pile up |
+| ***Token-bucket rate limiter*** | `RateLimiter` (burst 2, 4/min) guarding `InstanceInfoReplicator.onDemandUpdate()` | flapping health can't flood the registry with re-registrations |
+| ***Dirty flag + periodic flush*** | `InstanceInfo.isDirty()/setIsDirty()` with `lastDirtyTimestamp`; `InstanceInfoReplicator.run()` re-registers only when dirty | local changes are cheap; the registry sees each change once |
+| ***Quarantine list (circuit-breaker-like)*** | `RetryableEurekaHttpClient.quarantineSet`, cleared at `retryable-client-quarantine-refresh-percentage` | stops retrying a dead node on every call, without ever giving up on the whole cluster |
+| ***Session with jitter*** | `SessionedEurekaHttpClient.randomizeSessionDuration` (20 min ± 50 %) | clients re-spread across registry nodes over time instead of all sticking to the first one |
+| ***Facade*** | `DiscoveryClient` hides transport, scheduling, caching and registration behind `EurekaClient` | apps and Spring only see `getInstancesByVipAddress` / `getApplications` |
+| ***Adapter*** (Spring Cloud) | `EurekaDiscoveryClient` → Spring's `DiscoveryClient`; `EurekaServiceInstance` → `ServiceInstance` (`isSecure()`, `getUri()`) | gateway, LoadBalancer and SBA stay registry-agnostic |
+| ***CQRS-style split*** | separate `registrationClient` (writes) and `queryClient` (reads), each with its own resolver and session | reads can target a different/closer node than writes |
+
+***Principles behind the code***
+
+- ***Client-side caching first*** — every lookup is served from memory; the network is only for the 30 s refresh and
+  the heartbeat. Registry outages degrade freshness, not availability.
+- ***Smart client, dumb server*** — failover, randomization, reconciliation and rate limiting all live here.
+- ***Self-healing by repetition*** — heartbeats re-register on `404`, deltas reconcile by hash, sessions rotate:
+  every failure mode is repaired by the next periodic action rather than by special recovery code.
 
 <a id="tests"></a>
 

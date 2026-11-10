@@ -2,11 +2,11 @@
 # Dev-only TLS material for the local stack. Creates a private CA and one server certificate signed by it,
 # then copies two PKCS12 stores into the modules' src/main/resources/tls/ (read by spring.ssl.bundle.jks.*):
 #
-#   server.p12      server certificate + private key   -> eureka-server, order-service, product-service
-#                   (the modules that SERVE HTTPS; server.ssl.bundle: server)
+#   server.p12      server certificate + private key   -> eureka-server, order-service, product-service, admin-server
+#                   (the modules that SERVE HTTPS; bundle "service-identity", app.tls.server-bundle)
 #   truststore.p12  the CA certificate only             -> every module that CALLS an HTTPS endpoint
 #                   (eureka-server, admin-server, gateway-service, user-service, order-service, product-service:
-#                    bundle "trust"; zipkin-server: JVM default trust store, see DevCaTrust)
+#                    bundle "internal-ca", app.tls.trust-bundle; zipkin-server: JVM default trust store, see DevCaTrust)
 #
 # The server certificate's SubjectAltName must contain every host name a client puts in the URL, or hostname
 # verification fails ("No subject alternative names matching IP address ... found"):
@@ -23,7 +23,7 @@ PASSWORD="${TLS_STORE_PASSWORD:-changeit}"  # must match TLS_KEYSTORE_PASSWORD /
 DAYS="${TLS_DAYS:-825}"
 SAN="DNS:localhost,IP:127.0.0.1,IP:127.0.0.2${EXTRA_SAN:+,$EXTRA_SAN}"
 
-SERVER_MODULES=(eureka-server order-service product-service)
+SERVER_MODULES=(eureka-server order-service product-service admin-server)
 TRUST_MODULES=(eureka-server admin-server gateway-service user-service order-service product-service zipkin-server)
 
 rm -rf "$OUT" && mkdir -p "$OUT"

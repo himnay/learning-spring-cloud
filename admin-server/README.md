@@ -12,8 +12,26 @@
 8. 📝 [Logging to file](#logging)
 9. ⚙️ [Configuration reference](#configuration)
 10. 🔄 [Polling frequency](#polling)
-11. 🔬 [Internals: Spring Boot Admin 4.1 server and UI](#sba-internals) — modules, design, event sourcing, discovery/status sequence, polling loops, WebClient filters, UI ↔ server sequence
-12. 🎨 [Customizing and extending the SBA UI](#ui-customization) — properties, theme/brand, hiding views, external views, CSS and JS extensions (custom pages and instance tabs), template replacement
+11. 🔬 [Internals: Spring Boot Admin 4.1 server and UI](#sba-internals)
+    - 11.1 [Module map](#sba-internals-1)
+    - 11.2 [Design](#sba-internals-2)
+    - 11.3 [Discovery → registration → first status — sequence](#sba-internals-3)
+    - 11.4 [The three polling loops](#sba-internals-4)
+    - 11.5 [`InstanceWebClient` filter chain](#sba-internals-5)
+    - 11.6 [UI ↔ server — sequence](#sba-internals-6)
+    - 11.7 [Design patterns and principles in Spring Boot Admin](#sba-internals-7)
+    - 11.8 [Tech stack: how the SBA server and UI are built](#sba-internals-8)
+12. 🎨 [Customizing and extending the SBA UI](#ui-customization)
+    - 12.1 [How the page is assembled](#ui-customization-1)
+    - 12.2 [Level 1 — properties (`spring.boot.admin.ui.*`)](#ui-customization-2)
+    - 12.3 [Theme, brand and your own images](#ui-customization-3)
+    - 12.4 [Hiding built-in views](#ui-customization-4)
+    - 12.5 [External views and per-instance flags](#ui-customization-5)
+    - 12.6 [Level 2 — CSS extension](#ui-customization-6)
+    - 12.7 [Level 3 — JS extension: your own views and instance tabs](#ui-customization-7)
+    - 12.8 [Level 4 — replacing templates (last resort)](#ui-customization-8)
+    - 12.9 [Checked against this module](#ui-customization-9)
+    - 12.10 [Gotchas](#ui-customization-10)
 13. 🧪 [Tests](#tests)
 14. 🛠️ [Gotchas and troubleshooting](#gotchas)
 15. ❓ [Q&A](#qa)
@@ -40,7 +58,7 @@ overview: [../README.md](../README.md).
 - ***Role: a separate observer, not in the request path.*** It shows health,
   metrics, logs, environment, beans and so on for every instance registered in
   Eureka, and lets you act on them (change log levels, refresh, restart, shut down).
-- ***Port `8084`***, dashboard at http://localhost:8084.
+- ***Port `8084`, HTTPS only***, dashboard at https://localhost:8084 (import `certs/out/ca.crt` or click through).
 - ***Reactive stack.*** The SBA 4 server starter runs on WebFlux/Netty, so
   everything here (security, filters, tests) is the reactive variant.
 - ***Finds apps through Eureka, not by self-registration.*** With
@@ -52,14 +70,14 @@ overview: [../README.md](../README.md).
   its own dashboard as `ADMIN-SERVER`, next to `EUREKA-SERVER`, `USER-SERVICE`,
   `ORDER-SERVICE`, `PRODUCT-SERVICE` and `GATEWAY-SERVICE`.
 - ***Talks TLS to the registry and to order/product.*** Eureka client and SBA's `InstanceWebClient` both trust the
-  dev CA through the `trust` SSL bundle; the UI on `:8084` itself stays plain HTTP ([§5](#https)).
+  dev CA through the `internal-ca` SSL bundle, and the UI itself is served over HTTPS with `service-identity` ([§5](#https)).
 - Entry point: [AdminServerApplication.java](src/main/java/com/learning/discovery/admin/AdminServerApplication.java),
   annotated with `@EnableAdminServer` + `@SpringBootApplication`.
 
 | Component         | Version (as of 2026)                        | Where it comes from    |
 |-------------------|---------------------------------------------|------------------------|
 | Java              | 27                                          | `super-pom` parent     |
-| Spring Boot       | 4.1.1                                       | `super-pom` parent     |
+| Spring Boot       | 4.1.2                                       | `super-pom` parent     |
 | Spring Cloud      | 2025.1.x                                    | `super-pom` BOM import |
 | Spring Boot Admin | 4.1.x (`spring-boot-admin-starter-server`)  | `super-pom` BOM import |
 | Quartz            | Boot-managed (`spring-boot-starter-quartz`) | Boot BOM               |
@@ -98,7 +116,7 @@ mvn -pl admin-server spring-boot:run
 
 - ***IntelliJ***: run `AdminServerApplication` (its `main` is package-private
   and `static void main` with no `public`, which Java 25+ allows).
-- Open http://localhost:8084. You are redirected to `/login`.
+- Open https://localhost:8084. You are redirected to `/login`.
 - ***Credentials: `admin` / `admin`.*** Override them with environment variables:
 
 ```bash
@@ -261,13 +279,14 @@ How *SBA* authenticates to each service:
 
 ## <span style="color:hsl(45,80%,55%)">5. 🔒 HTTPS to the registry and the services</span>
 
-admin-server itself still listens on plain HTTP (`:8084`), but both of its outbound paths now use TLS where the
-target serves it. Whole-stack guide: root [§9](../README.md#https).
+admin-server serves its UI and API over HTTPS (`:8084`, bundle `service-identity` via `app.tls.server-bundle`),
+registers in Eureka as `https://127.0.0.1:8084`, and both of its outbound paths use TLS where the target serves it. Whole-stack guide: root [§9](../README.md#https).
 
 | Outbound call                                   | Client                                   | TLS config                                                                 |
 |-------------------------------------------------|------------------------------------------|----------------------------------------------------------------------------|
-| Eureka client → registry (`https://…:8761-8763`) | `CloudEurekaClient`, RestClient transport | bundle `trust` via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/admin/config/EurekaClientTlsConfig.java) |
-| SBA → each instance's actuator                   | `InstanceWebClient` (Reactor Netty)       | `spring.http.clients.ssl.bundle: trust` in [`application.yml`](src/main/resources/application.yml) |
+| Browser → UI/API (`https://localhost:8084`)      | Reactor Netty server                      | `server.ssl.bundle: ${app.tls.server-bundle}` (`service-identity`, `tls/server.p12`); plain `http://` connections are closed |
+| Eureka client → registry (`https://…:8761-8763`) | `CloudEurekaClient`, RestClient transport | bundle `internal-ca` via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/admin/config/EurekaClientTlsConfig.java) |
+| SBA → each instance's actuator (itself included) | `InstanceWebClient` (Reactor Netty)       | `spring.http.clients.ssl.bundle: ${app.tls.trust-bundle}` in [`application.yml`](src/main/resources/application.yml) |
 
 - ***Why one property is enough for SBA*** — `AdminServerInstanceWebClientConfiguration` builds
   `InstanceWebClient.builder(webClient)` from the `WebClient.Builder` bean Boot auto-configures; Boot applies
@@ -541,6 +560,8 @@ Read from the `spring-boot-admin-server` and `spring-boot-admin-server-cloud` 4.
 whole design: ***discovery turns registry entries into `Registration`s***, the ***instance is an event-sourced
 aggregate***, and ***everything else reacts to the event stream***.
 
+<a id="sba-internals-1"></a>
+
 ### 11.1 Module map
 
 | Module / package                          | Key types                                                                                                   | Job                                                                         |
@@ -553,6 +574,8 @@ aggregate***, and ***everything else reacts to the event stream***.
 | `server` `…web`                           | `ApplicationsController`, `InstancesController`, `InstancesProxyController`, `InstanceWebProxy`, `SsrfUrlValidator` | REST + SSE API for the UI, actuator proxy                          |
 | `server` `…notify`                        | `Notifier` implementations (mail, Slack, Teams, …), `FilteringNotifier`                                     | react to status changes (none configured here)                              |
 | `server-ui`                               | `UiController`, `AdminServerUiAutoConfiguration`, Vue 3 SPA under `META-INF/spring-boot-admin-server-ui`     | serves the single-page UI and its settings                                  |
+
+<a id="sba-internals-2"></a>
 
 ### 11.2 Design
 
@@ -626,6 +649,8 @@ classDiagram
 - ***One hot stream*** — `InstanceEventPublisher` emits every appended event into a unicast sink shared through
   `publish().autoConnect(0)`; each trigger, the snapshot cache, notifiers and every UI SSE connection subscribe to it.
 
+<a id="sba-internals-3"></a>
+
 ### 11.3 Discovery → registration → first status — sequence
 
 ```mermaid
@@ -668,6 +693,8 @@ sequenceDiagram
     Note over SUT,IUT: afterwards IntervalCheck re-polls: status every 10 s,<br/>info every 1 min, each with backoff on errors
 ```
 
+<a id="sba-internals-4"></a>
+
 ### 11.4 The three polling loops
 
 | Loop                      | Starts on                                                                 | Interval (`spring.boot.admin.monitor.*`)                      | Result → event                                                               |
@@ -679,6 +706,8 @@ sequenceDiagram
 `IntervalCheck` drives the periodic part: every interval it checks each instance whose last check is older than the
 lifetime, and doubles the per-instance delay after failures up to the max backoff. The rates and tuning knobs are in
 [§10](#polling).
+
+<a id="sba-internals-5"></a>
 
 ### 11.5 `InstanceWebClient` filter chain
 
@@ -697,6 +726,8 @@ in `@Order`:
 | 200   | `timeout`                      | `spring.boot.admin.monitor.default-timeout` (10 s) / per endpoint                         |
 
 The connector underneath is Boot's (`spring.http.clients.*`), which is where the TLS bundle plugs in ([§5](#https)).
+
+<a id="sba-internals-6"></a>
 
 ### 11.6 UI ↔ server — sequence
 
@@ -731,6 +762,76 @@ sequenceDiagram
 - ***Live updates are SSE***, not polling from the browser: the server's polling loops (11.4) produce events, and
   the SSE endpoints stream them. A proxy that buffers responses (or a too-short idle timeout) freezes the dashboard.
 
+<a id="sba-internals-7"></a>
+
+### 11.7 Design patterns and principles in Spring Boot Admin
+
+| Pattern / principle | Where (SBA 4.1.3) | What it buys |
+|---|---|---|
+| ***Event Sourcing*** | `Instance` is rebuilt from `InstanceEvent`s; `EventsourcingInstanceRepository` appends to `InstanceEventStore` (`InMemoryEventStore`, `HazelcastEventStore`) | full history per instance (the *Journal*), replay after a cluster node joins, no in-place mutation |
+| ***Immutable aggregate*** | every `Instance.withX(...)` returns a copy with one more `unsavedEvent`, or `this` when nothing changed | thread-safe sharing of instance state across reactive pipelines |
+| ***Optimistic concurrency*** | aggregate `version` checked on append (`OptimisticLockingException`); `repository.compute(...)` retries on fresh state | concurrent pollers and discovery updates never lose each other's events |
+| ***Snapshot (memento cache)*** | `SnapshottingInstanceRepository` keeps the latest `Instance` per id, invalidates on lock conflicts | O(1) reads for the UI without replaying the event log |
+| ***Publish–subscribe (reactive)*** | `InstanceEventPublisher`: `Sinks.many().unicast()` → `publish().autoConnect(0)`; subscribers extend `AbstractEventHandler` | triggers, notifiers, snapshot cache and SSE clients decouple completely ([11.4](#sba-internals-4)) |
+| ***Reactor (event-driven) triggers*** | `StatusUpdateTrigger`, `EndpointDetectionTrigger`, `InfoUpdateTrigger` react to specific event types; `IntervalCheck` adds periodic re-checks | work happens because something changed, plus a heartbeat for drift |
+| ***Chain of Responsibility (filters)*** | `InstanceExchangeFilterFunction`s ordered 0–200 on `InstanceWebClient` ([11.5](#sba-internals-5)) | auth, URL rewriting, legacy conversion, retry and timeout as independent links |
+| ***Strategy*** | `EndpointDetectionStrategy` (`QueryIndexEndpointStrategy`, `ProbeEndpointsStrategy`, `ChainingStrategy` as a composite), `InstanceIdGenerator`, `ServiceInstanceConverter` (`Eureka…`, `Kubernetes…`, `Default…`), `HttpHeadersProvider`, `Notifier` | each concern swappable by declaring a bean |
+| ***Adapter*** | `ServiceInstanceConverter` turns a Spring Cloud `ServiceInstance` into an SBA `Registration`; `LegacyEndpointConverters` adapt Boot 1.x actuator payloads | one internal model regardless of discovery source or client generation |
+| ***Decorator*** | `FilteringNotifier` wraps a `Notifier` with `NotificationFilter`s; `CompositeHttpHeadersProvider` | add behaviour to notifiers/headers without subclassing |
+| ***Proxy (reverse proxy)*** | `InstancesProxyController` → `InstanceWebProxy` → `InstanceWebClient`; `SsrfUrlValidator`, `HttpHeaderFilter` | the browser never reaches services; credentials and TLS stay server-side ([11.6](#sba-internals-6)) |
+| ***Exponential backoff*** | `IntervalCheck` per-instance delay doubling up to `status-max-backoff` / `info-max-backoff` | a sick instance isn't hammered every 10 s |
+| ***Content hashing for identity*** | `HashingInstanceUrlIdGenerator`: first 12 hex chars of `SHA-1(healthUrl)` | stable ids across restarts without a database |
+| ***Plugin architecture (UI)*** | `SBA.use({install})` + `viewRegistry.addView`, extensions discovered by classpath scanning ([12.7](#ui-customization-7)) | new views without forking the UI |
+
+***Principles behind the code***
+
+- ***Observer, not participant*** — SBA only reads registries and polls actuators; nothing in the request path
+  depends on it, so it can be down without user impact.
+- ***Reactive all the way*** — WebFlux server, Reactor pipelines, SSE to the browser: thousands of polls run on a
+  handful of event-loop threads.
+- ***Everything is a bean*** — every strategy above is `@ConditionalOnMissingBean`, so customization means declaring
+  one bean, not patching SBA.
+
+<a id="sba-internals-8"></a>
+
+### 11.8 Tech stack: how the SBA server and UI are built
+
+Read from the 4.1.3 artifacts: the server POMs, and the UI jar's `META-INF/spring-boot-admin-server-ui/` assets,
+whose ***source maps*** list every bundled npm package (`assets/*.js.map`).
+
+***Server*** (`spring-boot-admin-server`, `-server-cloud`)
+
+| Concern | Technology |
+|---|---|
+| Language / build | Java 17+ baseline, Maven, Spring Boot auto-configuration (`AdminServerAutoConfiguration`, …) |
+| Web | ***Spring WebFlux*** + ***Project Reactor*** (`reactor-extra`); a Servlet/MVC variant exists (`web.servlet.InstancesProxyController`); this repo uses WebFlux |
+| HTTP to instances | `WebClient` (`spring-boot-starter-webclient`, Reactor Netty), wrapped as `InstanceWebClient` ([11.5](#sba-internals-5)) |
+| UI page rendering | ***Thymeleaf*** (`spring-boot-starter-thymeleaf`) renders `index.html`, `login.html`, `sba-settings.js`, `variables.css` ([12.1](#ui-customization-1)) |
+| Clustering (optional) | ***Hazelcast*** event store (`HazelcastEventStore`) — not used here, in-memory store instead |
+| Notifications (optional) | `spring-boot-starter-mail` + webhook notifiers (Slack, Teams, …) |
+| JSON | Jackson (`AdminServerModule`, mixins, sanitizing serializers) |
+
+***UI*** (`spring-boot-admin-server-ui`) — compiled when SBA is released; the jar holds only the built, hashed
+bundles (`assets/sba-*.js`, `*.css`) plus source maps, so no Node.js is needed to use or customize it.
+
+| Concern | Technology (from the source maps) |
+|---|---|
+| Framework | ***Vue 3*** — 167 single-file components (`.vue`) and 73 TypeScript modules; `globalThis.Vue` is exposed for extensions |
+| Language / build | ***TypeScript***, built with ***Vite*** (hashed chunks, `__vite-browser-external`) |
+| Styling | ***Tailwind CSS 4.3.3*** (+ PostCSS), ***PrimeVue 4*** components with `@primeuix/themes`, ***Headless UI*** (`@headlessui/vue`), ***Font Awesome*** icons (`@fortawesome/*`) |
+| Routing / i18n | `vue-router` (views registered through `viewRegistry`), `vue-i18n` (`@intlify/*`) + `primelocale` |
+| HTTP / live data | ***axios*** (+ `qs`) for REST and the actuator proxy, ***RxJS*** for polling streams, `event-source-polyfill` for SSE (`/applications`, `/instances/events`) |
+| Charts / wallboard | ***Chart.js*** (+ `chartjs-adapter-moment`) and ***D3*** (`d3-shape`, `d3-scale`, `d3-selection`, `d3-hierarchy`, `d3-transition`, …) |
+| Dates / formatting | `moment`, `dayjs`, `pretty-bytes`, `iso8601-duration`, `cronstrue` (human-readable cron for the scheduled-tasks view) |
+| Content rendering | `sanitize-html`, `autolinker`, `ansi_up` (coloured log file view), `js-yaml` |
+| Utilities | `lodash-es`, `fuse.js` (search), `file-saver` (heap/thread dump downloads), `@vueuse/core`, `mitt` (event bus), `nanoid`, `v3-infinite-loading`, a toast notification center |
+
+- ***Why it matters for extensions*** — custom views run inside this Vue 3 app: use the global `Vue` (never bundle a
+  second copy) and the `SBA.use` API; Tailwind/PrimeVue classes are visible to your components but are not a stable
+  API ([12.7](#ui-customization-7), [12.10](#ui-customization-10)).
+- ***Why it matters for security*** — the UI is a static SPA; every data call goes to admin-server (`/applications`,
+  `/instances/**`), never to a service directly ([11.6](#sba-internals-6)).
+
 <a id="ui-customization"></a>
 
 ## <span style="color:hsl(320,70%,60%)">12. 🎨 Customizing and extending the SBA UI</span>
@@ -746,6 +847,8 @@ levels, from no code to full replacement, all checked against the 4.1.3 jar (`Ad
 | 2     | CSS extension: override colours/CSS variables     | one `.css`    | mostly (CSS classes can change) |
 | 3     | JS extension: new top-level pages, new instance tabs, redirects | JS / Vue      | ✅ (public `SBA.use` API) |
 | 4     | Replace templates or static assets                | copy + edit   | ❌ (tied to one UI build) |
+
+<a id="ui-customization-1"></a>
 
 ### 12.1 How the page is assembled
 
@@ -778,6 +881,8 @@ sequenceDiagram
 - ***Deep links*** — the `HomepageForwardingFilter` forwards UI routes (`/about/**`, `/applications/**`,
   `/instances/**`, `/journal/**`, `/wallboard/**`, `/external/**`, plus every line of every `routes.txt`) to
   `index.html`, so a browser refresh on a client-side route doesn't 404.
+
+<a id="ui-customization-2"></a>
 
 ### 12.2 Level 1 — properties (`spring.boot.admin.ui.*`)
 
@@ -851,6 +956,8 @@ spring:
           threads: 5000
 ```
 
+<a id="ui-customization-3"></a>
+
 ### 12.3 Theme, brand and your own images
 
 - ***Colours*** — the palette ends up as `--main-50` … `--main-900` in `variables.css` (values rendered as
@@ -873,6 +980,8 @@ spring:
   outside `assets/` shows as a broken image on the login page; keep login-page images under `assets/` or permit
   their path. Extensions (`/extensions/**`) load only after login, so they can stay authenticated.
 
+<a id="ui-customization-4"></a>
+
 ### 12.4 Hiding built-in views
 
 `view-settings` takes the view ***name***. The ones in 4.1.3:
@@ -891,6 +1000,8 @@ spring:
   (`isEnabled: ({instance}) => instance.hasEndpoint('heapdump')`) — that's why `gateway` appears only for
   `GATEWAY-SERVICE` and `sessions` only for `ORDER-SERVICE`.
 
+<a id="ui-customization-5"></a>
+
 ### 12.5 External views and per-instance flags
 
 - ***External views*** — `url` + `label` makes a nav link (opens a new tab); `iframe: true` embeds it under
@@ -901,6 +1012,8 @@ spring:
   - `tags.*` — badges in the application list (already used: `tags.environment`, `tags.tier`).
   - `hide-url: "true"` / `disable-url: "true"` — hide or un-link that instance's URL (per-instance version of
     `hide-instance-url` / `disable-instance-url`).
+
+<a id="ui-customization-6"></a>
 
 ### 12.6 Level 2 — CSS extension
 
@@ -916,6 +1029,8 @@ Any `.css` under the extension location is linked into `index.html` after the UI
 
 Prefer `theme.palette` for colours; use CSS for what properties can't express. The login page doesn't load
 extension CSS.
+
+<a id="ui-customization-7"></a>
 
 ### 12.7 Level 3 — JS extension: your own views and instance tabs
 
@@ -1012,12 +1127,16 @@ SBA.use({
   index, and a tab with `isEnabled: ({instance}) => instance.hasEndpoint('teaminfo')` appears only on instances that
   have it.
 
+<a id="ui-customization-8"></a>
+
 ### 12.8 Level 4 — replacing templates (last resort)
 
 `index.html`, `login.html`, `sba-settings.js` and `variables.css` are Thymeleaf templates read from
 `template-location`. Pointing it (or `resource-locations`) at your own copies lets you change anything — e.g. a
 login page with a company notice — but the copies are tied to one UI build: the SPA bundle's file names and the
 model attributes change between SBA versions. Prefer levels 1–3.
+
+<a id="ui-customization-9"></a>
 
 ### 12.9 Checked against this module
 
@@ -1034,6 +1153,8 @@ entry:
 
 The browser rendering of the example views was not exercised here; the `SBA.use` / `viewRegistry.addView` / `Vue`
 contract above was read from the 4.1.3 bundle.
+
+<a id="ui-customization-10"></a>
 
 ### 12.10 Gotchas
 
@@ -1088,7 +1209,7 @@ mvn -pl admin-server verify -Dit.test=AdminServerApplicationIT
 | Instance `UP` but many views missing                  | endpoint not exposed on that service                                              | add it to that service's `management.endpoints.web.exposure.include`                                                                                                                     |
 | ***Login returns 403***                               | CSRF token missing: the cookie is blocked, or `CsrfControllerAdvice` was removed  | allow cookies for `localhost:8084`; keep the advice and `csrfCookieWebFilter`                                                                                                            |
 | Login page loops back to `/login`                     | wrong password (check the Audit Log for `AUTHENTICATION_FAILURE`)                 | use the env-var credentials                                                                                                                                                              |
-| curl to the API gets `401` instead of a redirect      | expected: non-HTML requests get the Basic challenge                               | `curl -u admin:admin http://localhost:8084/applications`                                                                                                                                 |
+| curl to the API gets `401` instead of a redirect      | expected: non-HTML requests get the Basic challenge                               | `curl --cacert certs/out/ca.crt -u admin:admin https://localhost:8084/applications`                                                                                                                                 |
 | Logfile view says not found                           | no `logging.file.name`, or the file was deleted                                   | keep the property; the file is recreated on the next log line                                                                                                                            |
 | SBOM view empty                                       | app started without a Maven build that ran CycloneDX                              | `mvn -pl admin-server package` once                                                                                                                                                      |
 | Restarted eureka-server, instances vanish             | registry is in-memory; clients re-register on their next heartbeat (~10s)         | ***restart order: eureka-server first***, then the services, then admin-server; or just wait                                                                                             |
@@ -1150,7 +1271,7 @@ spring:
   boot:
     admin:
       client:
-        url: http://localhost:8084                  # SBA server
+        url: https://localhost:8084                 # SBA server
         username: ${ACTUATOR_USER:admin}            # to log in to SBA's /instances
         password: ${ACTUATOR_PASSWORD:admin}
         instance:
@@ -1383,7 +1504,7 @@ logged-in SBA session, and how narrow should the exemption be?**
   checks on `POST .../actuator/shutdown`, `.../env`, `.../refresh` and `.../loggers` for ***every*** instance. The only
   session check left on those requests is the session cookie.
 - ***Attack*** — an engineer is logged in to `:8084`. A page they open sends
-  `POST http://localhost:8084/instances/<id>/actuator/shutdown`. The browser attaches the `SESSION` cookie and SBA
+  `POST https://localhost:8084/instances/<id>/actuator/shutdown`. The browser attaches the `SESSION` cookie and SBA
   forwards the call with the Basic credentials from Eureka metadata ([§3.5](#security)). `order-service` stops.
 - ***What stops it today is SameSite, not CSRF.*** The WebFlux session cookie defaults to `SameSite=Lax`, so a
   ***cross-site*** POST carries no cookie. But SameSite ignores ports: any page on `localhost:*` is ***same-site***
