@@ -3,30 +3,31 @@
 ## <span style="color:hsl(151,80%,58%)">Table of contents</span>
 
 1. 🧩 [Modules](#modules)
-2. 🔎 [How the gateway finds services via Eureka](#how-the-gateway-finds-services-via-eureka)
-3. 🏗️ [Parent / BOM chain](#parent--bom-chain)
-4. 🚀 [Run order](#run-order)
-5. ✅ [Verify](#verify)
-6. 🧪 [Tests](#tests)
-7. ❓ [FAQ](#faq)
-    - 7.1 [What happens if a service's port changes after a restart?](#faq-port-change)
-    - 7.2 [How does the gateway route calls when there are multiple instances of the same service (load balancing)?](#faq-load-balancing)
-    - 7.3 [Does every gateway call go through Eureka, or does the gateway cache service locations?](#faq-gateway-cache)
-    - 7.4 [Why does `gateway-service` need Spring Cloud LoadBalancer at all if it already round-robins between instances?](#faq-why-loadbalancer)
-    - 7.5 [`order-service` now calls `user-service` directly (`GET /api/orders/{id}/with-user`) — does that bypass Eureka, since it skips the gateway?](#faq-order-calls-user)
-    - 7.6 [Eureka is CAP-theorem AP (favors Availability + Partition tolerance over Consistency) — what does that actually mean here, and what's the failure mode?](#faq-eureka-ap)
-    - 7.7 [What does self-preservation protect against, and is turning it off ever wrong?](#faq-self-preservation)
-    - 7.8 [Two `user-service` instances register with the same `instanceId` (e.g. identical `hostname:port` — common in containers with the same internal hostname) — what happens?](#faq-duplicate-instance-id)
-    - 7.9 [What's the worst-case time between an instance actually going down and the gateway noticing and routing around it?](#faq-worst-case-detection)
-    - 7.10 🔥 [One shared `admin` user, the caller's `Authorization` header forwarded as-is, the password in Eureka metadata — what is the blast radius of one leaked credential, and how would you redesign it?](#faq-shared-credentials-blast-radius)
-    - 7.11 🔥 [`user-service` degrades to a 25 s p99 under load — what happens to `order-service` and the gateway, and why doesn't the `user: null` fallback save you?](#faq-slow-downstream-cascade)
-    - 7.12 🔥 [Delete `order-service`'s `@Primary` plain `RestClient.Builder` and keep only the `@LoadBalanced` one — why does Eureka registration break, and what else silently changes?](#faq-primary-restclient-builder)
-    - 7.13 🔥🔥 [Design a zero-error rolling redeploy of `user-service` (3 instances) while traffic flows through the gateway and through `order-service`'s direct `UserClient` — what fails today, and what sequence fixes it?](#faq-zero-error-rolling-deploy)
-    - 7.14 🔥🔥 [Move this stack onto Kubernetes without a big-bang cutover — keep Eureka and the gateway or replace them, and how do you migrate service by service with rollback?](#faq-migrate-to-kubernetes)
-8. 🗺️ [Where this fits: Spring Cloud/Netflix OSS vs Kubernetes](#where-this-fits)
-9. 🌐 [Virtual IPs (VIP)](#virtual-ips-vip)
-10. 🔐 [Security and Spring Boot Admin features](#security-and-sba-features)
-11. 📡 [Actuator endpoints](#actuator-endpoints)
+2. 🏗️ [Parent / BOM chain](#parent--bom-chain)
+3. 🚀 [Run order](#run-order)
+4. ✅ [Verify](#verify)
+5. 🧪 [Tests](#tests)
+6. 🔎 [How the gateway finds services via Eureka](#how-the-gateway-finds-services-via-eureka)
+7. 🌐 [Virtual IPs (VIP)](#virtual-ips-vip)
+8. 🔐 [Security and Spring Boot Admin features](#security-and-sba-features)
+9. 🔒 [HTTPS between services (SSL bundles)](#https)
+10. 📡 [Actuator endpoints](#actuator-endpoints)
+11. 🗺️ [Where this fits: Spring Cloud/Netflix OSS vs Kubernetes](#where-this-fits)
+12. ❓ [FAQ](#faq)
+    - 12.1 [What happens if a service's port changes after a restart?](#faq-port-change)
+    - 12.2 [How does the gateway route calls when there are multiple instances of the same service (load balancing)?](#faq-load-balancing)
+    - 12.3 [Does every gateway call go through Eureka, or does the gateway cache service locations?](#faq-gateway-cache)
+    - 12.4 [Why does `gateway-service` need Spring Cloud LoadBalancer at all if it already round-robins between instances?](#faq-why-loadbalancer)
+    - 12.5 [`order-service` now calls `user-service` directly (`GET /api/orders/{id}/with-user`) — does that bypass Eureka, since it skips the gateway?](#faq-order-calls-user)
+    - 12.6 [Eureka is CAP-theorem AP (favors Availability + Partition tolerance over Consistency) — what does that actually mean here, and what's the failure mode?](#faq-eureka-ap)
+    - 12.7 [What does self-preservation protect against, and is turning it off ever wrong?](#faq-self-preservation)
+    - 12.8 [Two `user-service` instances register with the same `instanceId` (e.g. identical `hostname:port` — common in containers with the same internal hostname) — what happens?](#faq-duplicate-instance-id)
+    - 12.9 [What's the worst-case time between an instance actually going down and the gateway noticing and routing around it?](#faq-worst-case-detection)
+    - 12.10 🔥 [One shared `admin` user, the caller's `Authorization` header forwarded as-is, the password in Eureka metadata — what is the blast radius of one leaked credential, and how would you redesign it?](#faq-shared-credentials-blast-radius)
+    - 12.11 🔥 [`user-service` degrades to a 25 s p99 under load — what happens to `order-service` and the gateway, and why doesn't the `user: null` fallback save you?](#faq-slow-downstream-cascade)
+    - 12.12 🔥 [Delete `order-service`'s `@Primary` plain `RestClient.Builder` and keep only the `@LoadBalanced` one — why does Eureka registration break, and what else silently changes?](#faq-primary-restclient-builder)
+    - 12.13 🔥🔥 [Design a zero-error rolling redeploy of `user-service` (3 instances) while traffic flows through the gateway and through `order-service`'s direct `UserClient` — what fails today, and what sequence fixes it?](#faq-zero-error-rolling-deploy)
+    - 12.14 🔥🔥 [Move this stack onto Kubernetes without a big-bang cutover — keep Eureka and the gateway or replace them, and how do you migrate service by service with rollback?](#faq-migrate-to-kubernetes)
 
 Eureka service discovery demo. 6 Maven modules: 1 Eureka registry (run as 2–3
 replicating nodes) + 3 REST microservices + 1 API gateway + 1 Spring Boot Admin
@@ -41,8 +42,8 @@ receiver).
 |------------------------------------------------------------------------------------------------|------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
 | [`eureka-server`](eureka-server/README.md)                                                     | 8761–8763  | Service registry / dashboard — 2-3 replicating nodes, one module, one profile each (`peer1`, `peer2`, `peer3`)                                      | —                                                                                                                                      | —                                                                                  |
 | [`user-service`](user-service/README.md)                                                       | 8081       | Eureka client                                                                                                                                       | `GET /api/users`, `GET /api/users/{id}`                                                                                                | http://localhost:8081/swagger-ui.html                                              |
-| [`order-service`](order-service/README.md)                                                     | 8082       | Eureka client                                                                                                                                       | `GET /api/orders`, `GET /api/orders/{id}`, `GET /api/orders/{id}/with-user` (calls `user-service` directly, load-balanced, no gateway) | http://localhost:8082/swagger-ui.html                                              |
-| [`product-service`](product-service/README.md)                                                 | 8083       | Eureka client                                                                                                                                       | `GET /api/products`, `GET /api/products/{id}`                                                                                          | http://localhost:8083/swagger-ui.html                                              |
+| [`order-service`](order-service/README.md)                                                     | 8082       | Eureka client                                                                                                                                       | `GET /api/orders`, `GET /api/orders/{id}`, `GET /api/orders/{id}/with-user` (calls `user-service` directly, load-balanced, no gateway) | https://localhost:8082/swagger-ui.html                                             |
+| [`product-service`](product-service/README.md)                                                 | 8083       | Eureka client                                                                                                                                       | `GET /api/products`, `GET /api/products/{id}`                                                                                          | https://localhost:8083/swagger-ui.html                                             |
 | [`gateway-service`](gateway-service/README.md)                                                 | 8080       | Eureka client + API gateway                                                                                                                         | routes `/api/users/**`, `/api/orders/**`, `/api/products/**` to the 3 services above via `lb://`                                       | http://localhost:8080/swagger-ui.html — aggregated, one dropdown entry per service |
 | [`admin-server`](admin-server/README.md)                                                       | 8084       | Spring Boot Admin — discovers instances via Eureka, dashboard at http://localhost:8084 (login `admin`/`admin`)                                      | —                                                                                                                                      | —                                                                                  |
 | [`zipkin-server`](zipkin-server/README.md)                                                     | 9411       | Zipkin server (`@EnableZipkinServer`, own Spring Boot 3.5 build, no parent), Eureka client, takes OTLP at `/v1/traces`, UI at http://localhost:9411 | —                                                                                                                                      | —                                                                                  |
@@ -50,7 +51,7 @@ receiver).
 Every module is secured with HTTP Basic, one shared user `admin`/`admin`
 (override with `ACTUATOR_USER` / `ACTUATOR_PASSWORD`). Only
 `/actuator/health` and `/actuator/info` are public — see
-[§10](#security-and-sba-features). `order-service`, `user-service` and
+[§8](#security-and-sba-features). `order-service`, `user-service` and
 `product-service` need Docker: each starts its own Postgres from the
 `docker-compose.yaml` in its module directory (host ports 5433, 5434, 5436).
 The Insomnia collection for the gateway routes is
@@ -63,9 +64,131 @@ followed across gateway → order-service → user-service — see
 its OpenAPI spec at `/v3/api-docs` (HTTP Basic declared, so Swagger UI's ***Authorize*** button works); the gateway's
 Swagger UI shows all three.
 
+<a id="parent--bom-chain"></a>
+
+## <span style="color:hsl(118,80%,58%)">2. 🏗️ Parent / BOM chain</span>
+
+```
+super-pom (com.org.llm:super-pom:1.2.1)   ← corporate parent (Boot 4.1.1, Java 27), imports learning-bom 3.1.0
+  └── learning-spring-cloud (com.learning:learning-spring-cloud)  ← this repo's root pom, packaging=pom
+        ├── eureka-server
+        ├── admin-server
+        ├── user-service
+        ├── order-service
+        ├── product-service
+        └── gateway-service
+```
+
+- Root `pom.xml` declares `super-pom` as `<parent>`. `super-pom` imports
+  `learning-bom` in its `dependencyManagement`.
+- `learning-bom` already imports `spring-boot-dependencies`,
+  `spring-cloud-dependencies` (Eureka artifacts) and the `springdoc` starters —
+  every dependency this repo uses is already version-managed there.
+- **No `<version>` is declared anywhere in this project** — every module pom
+  and every `<dependency>` relies entirely on the inherited
+  `dependencyManagement` chain (super-pom → learning-bom). Module artifact
+  versions (`0.0.1-SNAPSHOT`) come from the parent `<parent><version>` +
+  inheritance, never hardcoded per-module.
+- No new dependency versions needed adding to `learning-bom` — Eureka (`spring-cloud-starter-netflix-eureka-server` /
+  `-client`) and Swagger (`springdoc-openapi-starter-webmvc-ui`) were already present in its
+  dependency management before this repo was created.
+
+<a id="run-order"></a>
+
+## <span style="color:hsl(256,80%,58%)">3. 🚀 Run order</span>
+
+Eureka server must be up first so the other clients have somewhere to register.
+The tracing stack is optional and can start at any time.
+
+```bash
+cd learning-spring-cloud
+./certs/generate-certs.sh                    # once: dev CA + TLS stores (§9)
+mvn -pl zipkin-server spring-boot:run &      # optional: tracing UI at http://localhost:9411
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer1 &
+# once it is up (it builds eureka-server/target, which the other nodes reuse):
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer2 &
+mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer3 &   # optional third node
+# wait for them to come up, then:
+mvn -pl user-service spring-boot:run &
+mvn -pl order-service spring-boot:run &
+mvn -pl product-service spring-boot:run &
+mvn -pl gateway-service spring-boot:run &
+mvn -pl admin-server spring-boot:run &
+```
+
+Load test the running stack with Grafana k6: `k6 run load-tests/gateway.js` (install + profiles
+in [load-tests/README.md](load-tests/README.md)).
+
+Or build everything first: `mvn clean install`, then run each module's jar.
+`java -jar` skips `spring-boot-docker-compose` (the repackaged jar excludes it), so
+for user/order/product-service start the module's `docker-compose.yaml` yourself
+and pass `spring.datasource.*`, or use `spring-boot:run`.
+
+<a id="verify"></a>
+
+## <span style="color:hsl(33,80%,58%)">4. ✅ Verify</span>
+
+- **TLS first**: run [`./certs/generate-certs.sh`](certs/generate-certs.sh) once before building (registry,
+  order and product serve HTTPS only — [§9](#https)); `curl` needs `--cacert certs/out/ca.crt`, browsers need the CA
+  imported or a click-through.
+- **Eureka dashboards**: https://localhost:8761, https://localhost:8762 and https://localhost:8763 (same registry,
+  replicated; each node's *DS Replicas* lists the others) — list
+  `USER-SERVICE`,
+  `ORDER-SERVICE`, `PRODUCT-SERVICE`, `GATEWAY-SERVICE`, `ADMIN-SERVER` once all
+  5 clients register (takes a few seconds after startup; heartbeats every 10 s).
+- **Spring Boot Admin dashboard**: http://localhost:8084 — same instances as
+  Eureka above (discovered via [`DiscoveryClient`][DiscoveryClient], not manually registered), but
+  with drill-down per instance: health, `/env`, `/metrics`, `/loggers` (change
+  log levels live), `/threaddump`, `/heapdump`, `/mappings`, `/beans`,
+  `/configprops`, plus the views listed in [§8](#security-and-sba-features).
+  `EUREKA-SERVER` is listed too — one instance per running node.
+- **Health checks** (Spring Boot Actuator, `show-details: always`):
+    - https://localhost:8761/actuator/health (other nodes: :8762, :8763)
+    - http://localhost:8081/actuator/health
+    - https://localhost:8082/actuator/health
+    - https://localhost:8083/actuator/health
+    - http://localhost:8080/actuator/health
+    - http://localhost:8084/actuator/health
+- **Through the gateway** (resolves target service via Eureka, no hardcoded port):
+  ```bash
+  curl -u admin:admin http://localhost:8080/api/users
+  curl -u admin:admin http://localhost:8080/api/orders
+  curl -u admin:admin http://localhost:8080/api/products
+  ```
+- **Swagger UI / OpenAPI** for each microservice (springdoc default paths):
+    - UI: `http://localhost:8081/swagger-ui.html`, `https://localhost:8082/…`, `https://localhost:8083/…`
+    - Raw spec: `<same base>/v3/api-docs`
+- **Sample REST calls**:
+  ```bash
+  curl -u admin:admin http://localhost:8081/api/users
+  curl --cacert certs/out/ca.crt -u admin:admin https://localhost:8082/api/orders
+  curl --cacert certs/out/ca.crt -u admin:admin https://localhost:8083/api/products
+  ```
+
+<a id="tests"></a>
+
+## <span style="color:hsl(171,80%,58%)">5. 🧪 Tests</span>
+
+Each microservice module has:
+
+- **Unit tests** (`*ControllerTest`) — [`@WebMvcTest`][WebMvcTest] + [`MockMvc`][MockMvc], no Spring
+  context beyond the web layer, no network/Eureka involved.
+- **Integration tests** (`*ApplicationIT`) — [`@SpringBootTest`][SpringBootTest] with a random
+  port + [`RestTestClient`][RestTestClient] (`gateway-service`: [`WebTestClient`][WebTestClient]), hitting
+  the real embedded server and the actuator health endpoint. `eureka.client.enabled=false` in
+  `src/test/resources/application-test.yml` so tests don't need a live Eureka
+  server.
+
+`eureka-server` has its own `@SpringBootTest` that boots the registry and
+asserts the dashboard and health endpoint respond.
+
+Run all tests: `mvn clean verify` (failsafe plugin from `super-pom` runs the
+`*IT` classes in the `integration-test` phase; surefire runs `*Test` in the
+`test` phase).
+
 <a id="how-the-gateway-finds-services-via-eureka"></a>
 
-## <span style="color:hsl(66,80%,50%)">2. 🔎 How the gateway finds services via Eureka</span>
+## <span style="color:hsl(66,80%,50%)">6. 🔎 How the gateway finds services via Eureka</span>
 
 `gateway-service` never hardcodes a backend host or port. It is itself a
 Eureka client (same `eureka.client.service-url.defaultZone` as the other 3
@@ -132,7 +255,7 @@ the raw Eureka dashboard.
 
 > ⚠️ So the dashboard has something to show, every service exposes `env`, `configprops`,
 > `beans`, `threaddump` and `heapdump` over HTTP, guarded only by the one shared Basic login
-> (`admin`/`admin`, [§10](#security-and-sba-features)). That is fine on a laptop and dangerous anywhere else: a heap dump contains every secret the process holds.
+> (`admin`/`admin`, [§8](#security-and-sba-features)). That is fine on a laptop and dangerous anywhere else: a heap dump contains every secret the process holds.
 > Outside local development, serve actuator on a separate `management.server.port` that only
 > the admin server can reach (or secure it), and drop `heapdump` from the exposure list.
 
@@ -232,132 +355,402 @@ sequenceDiagram
     U1 -->> Client: 200
 ```
 
-Verify it yourself: `curl -u admin:admin http://localhost:8761/eureka/apps/USER-SERVICE`
+Verify it yourself: `curl --cacert certs/out/ca.crt -u admin:admin https://localhost:8761/eureka/apps/USER-SERVICE`
 shows both instances under one `<application>`; then hit
 `curl -u admin:admin http://localhost:8080/api/users` a few times in a row and watch the
 port in each `user-service` log line alternate.
 
-<a id="parent--bom-chain"></a>
+<a id="virtual-ips-vip"></a>
 
-## <span style="color:hsl(118,80%,58%)">3. 🏗️ Parent / BOM chain</span>
+## <span style="color:hsl(223,80%,58%)">7. 🌐 Virtual IPs (VIP)</span>
 
-```
-super-pom (com.org.llm:super-pom:1.2.1)   ← corporate parent (Boot 4.1.1, Java 27), imports learning-bom 3.1.0
-  └── learning-spring-cloud (com.learning:learning-spring-cloud)  ← this repo's root pom, packaging=pom
-        ├── eureka-server
-        ├── admin-server
-        ├── user-service
-        ├── order-service
-        ├── product-service
-        └── gateway-service
-```
+In Netflix Eureka, a Virtual IP (VIP) address is a logical identifier or
+virtual hostname assigned to a service instance, defaulting to the
+application name (`spring.application.name`).
 
-- Root `pom.xml` declares `super-pom` as `<parent>`. `super-pom` imports
-  `learning-bom` in its `dependencyManagement`.
-- `learning-bom` already imports `spring-boot-dependencies`,
-  `spring-cloud-dependencies` (Eureka artifacts) and the `springdoc` starters —
-  every dependency this repo uses is already version-managed there.
-- **No `<version>` is declared anywhere in this project** — every module pom
-  and every `<dependency>` relies entirely on the inherited
-  `dependencyManagement` chain (super-pom → learning-bom). Module artifact
-  versions (`0.0.1-SNAPSHOT`) come from the parent `<parent><version>` +
-  inheritance, never hardcoded per-module.
-- No new dependency versions needed adding to `learning-bom` — Eureka (`spring-cloud-starter-netflix-eureka-server` /
-  `-client`) and Swagger (`springdoc-openapi-starter-webmvc-ui`) were already present in its
-  dependency management before this repo was created.
+**What is a Virtual IP (VIP) in Eureka?**
 
-<a id="run-order"></a>
+- **Logical name**: instead of pointing to a physical network IP address, a
+  VIP acts as a logical name (like `USER-SERVICE`) that clients use to
+  target a group of identical service instances.
+- **Default value**: by default, Spring Cloud Netflix Eureka sets the
+  virtual host (`vipAddress`) and secure virtual host (`secureVipAddress`)
+  to the value of `${spring.application.name}`.
+- **Load balancing**: clients use this virtual identifier to resolve where
+  requests should go, allowing Eureka and client-side load balancers (like
+  Ribbon or Spring Cloud LoadBalancer) to route traffic dynamically across
+  healthy instances.
 
-## <span style="color:hsl(256,80%,58%)">4. 🚀 Run order</span>
+**How to configure VIP in Eureka**
 
-Eureka server must be up first so the other clients have somewhere to register.
-The tracing stack is optional and can start at any time.
+Override the default virtual IP settings in application properties if the
+logical identifier needs to differ from the application name:
 
-```bash
-cd learning-spring-cloud
-mvn -pl zipkin-server spring-boot:run &      # optional: tracing UI at http://localhost:9411
-mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer1 &
-# once it is up (it builds eureka-server/target, which the other nodes reuse):
-mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer2 &
-mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer3 &   # optional third node
-# wait for them to come up, then:
-mvn -pl user-service spring-boot:run &
-mvn -pl order-service spring-boot:run &
-mvn -pl product-service spring-boot:run &
-mvn -pl gateway-service spring-boot:run &
-mvn -pl admin-server spring-boot:run &
+```yaml
+eureka:
+  instance:
+    virtual-host-name: custom-service-vip
+    secure-virtual-host-name: secure-custom-service-vip
 ```
 
-Load test the running stack with Grafana k6: `k6 run load-tests/gateway.js` (install + profiles
-in [load-tests/README.md](load-tests/README.md)).
+<!-- Library classes mentioned above, linked to their source at the versions this project builds with. -->
 
-Or build everything first: `mvn clean install`, then run each module's jar.
-`java -jar` skips `spring-boot-docker-compose` (the repackaged jar excludes it), so
-for user/order/product-service start the module's `docker-compose.yaml` yourself
-and pass `spring.datasource.*`, or use `spring-boot:run`.
+[DiscoveryClient]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-commons/src/main/java/org/springframework/cloud/client/discovery/DiscoveryClient.java
+[EurekaDiscoveryClient]: https://github.com/spring-cloud/spring-cloud-netflix/blob/v5.0.2/spring-cloud-netflix-eureka-client/src/main/java/org/springframework/cloud/netflix/eureka/EurekaDiscoveryClient.java
+[LoadBalanced]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-commons/src/main/java/org/springframework/cloud/client/loadbalancer/LoadBalanced.java
+[MockMvc]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-test/src/main/java/org/springframework/test/web/servlet/MockMvc.java
+[ReactiveLoadBalancerClientFilter]: https://github.com/spring-cloud/spring-cloud-gateway/blob/v5.0.3/spring-cloud-gateway-server-webflux/src/main/java/org/springframework/cloud/gateway/filter/ReactiveLoadBalancerClientFilter.java
+[ReactorServiceInstanceLoadBalancer]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-loadbalancer/src/main/java/org/springframework/cloud/loadbalancer/core/ReactorServiceInstanceLoadBalancer.java
+[RestClient]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-web/src/main/java/org/springframework/web/client/RestClient.java
+[RestClientException]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-web/src/main/java/org/springframework/web/client/RestClientException.java
+[RestTestClient]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-test/src/main/java/org/springframework/test/web/servlet/client/RestTestClient.java
+[RoundRobinLoadBalancer]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-loadbalancer/src/main/java/org/springframework/cloud/loadbalancer/core/RoundRobinLoadBalancer.java
+[ServiceInstanceListSupplier]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-loadbalancer/src/main/java/org/springframework/cloud/loadbalancer/core/ServiceInstanceListSupplier.java
+[SpringBootTest]: https://github.com/spring-projects/spring-boot/blob/v4.1.1/core/spring-boot-test/src/main/java/org/springframework/boot/test/context/SpringBootTest.java
+[WebMvcTest]: https://github.com/spring-projects/spring-boot/blob/v4.1.1/module/spring-boot-webmvc-test/src/main/java/org/springframework/boot/webmvc/test/autoconfigure/WebMvcTest.java
+[WebTestClient]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-test/src/main/java/org/springframework/test/web/reactive/server/WebTestClient.java
 
-<a id="verify"></a>
+<a id="security-and-sba-features"></a>
 
-## <span style="color:hsl(33,80%,58%)">5. ✅ Verify</span>
+## <span style="color:hsl(0,80%,58%)">8. 🔐 Security and Spring Boot Admin features</span>
 
-- **Eureka dashboards**: http://localhost:8761, http://localhost:8762 and http://localhost:8763 (same registry,
-  replicated; each node's *DS Replicas* lists the others) — list
-  `USER-SERVICE`,
-  `ORDER-SERVICE`, `PRODUCT-SERVICE`, `GATEWAY-SERVICE`, `ADMIN-SERVER` once all
-  5 clients register (takes a few seconds after startup; heartbeats every 10 s).
-- **Spring Boot Admin dashboard**: http://localhost:8084 — same instances as
-  Eureka above (discovered via [`DiscoveryClient`][DiscoveryClient], not manually registered), but
-  with drill-down per instance: health, `/env`, `/metrics`, `/loggers` (change
-  log levels live), `/threaddump`, `/heapdump`, `/mappings`, `/beans`,
-  `/configprops`, plus the views listed in [§10](#security-and-sba-features).
-  `EUREKA-SERVER` is listed too — one instance per running node.
-- **Health checks** (Spring Boot Actuator, `show-details: always`):
-    - http://localhost:8761/actuator/health (other nodes: :8762, :8763)
-    - http://localhost:8081/actuator/health
-    - http://localhost:8082/actuator/health
-    - http://localhost:8083/actuator/health
-    - http://localhost:8080/actuator/health
-    - http://localhost:8084/actuator/health
-- **Through the gateway** (resolves target service via Eureka, no hardcoded port):
-  ```bash
-  curl -u admin:admin http://localhost:8080/api/users
-  curl -u admin:admin http://localhost:8080/api/orders
-  curl -u admin:admin http://localhost:8080/api/products
-  ```
-- **Swagger UI / OpenAPI** for each microservice (springdoc default paths):
-    - UI: `http://localhost:<port>/swagger-ui.html`
-    - Raw spec: `http://localhost:<port>/v3/api-docs`
-- **Sample REST calls**:
-  ```bash
-  curl -u admin:admin http://localhost:8081/api/users
-  curl -u admin:admin http://localhost:8082/api/orders
-  curl -u admin:admin http://localhost:8083/api/products
-  ```
+**Security (as of 2026, Spring Boot 4.1 / SBA 4.1):**
 
-<a id="tests"></a>
+- ***One shared user per module*** — `spring.security.user` = `admin`/`admin` (`ACTUATOR_USER` / `ACTUATOR_PASSWORD`),
+  HTTP Basic everywhere; `/actuator/health/**` and `/actuator/info` stay public for probes.
+- ***Eureka needs credentials too*** — clients register via `http://admin:admin@localhost:8761/eureka/`; `eureka-server`
+  disables CSRF for `/eureka/**`.
+- ***SBA polls each actuator with metadata credentials*** — every instance publishes
+  `eureka.instance.metadata-map.user.name/user.password`; `admin-server` falls back to
+  `spring.boot.admin.instance-auth.default-*`.
+- ***Gateway forwards `Authorization`*** — call the gateway with Basic auth and the same header reaches the downstream
+  service; `order-service` adds Basic auth to its direct `user-service` call.
+- ***`admin-server` and `gateway-service` are WebFlux*** — reactive `SecurityWebFilterChain`, a wrapped authentication
+  manager publishes login events for Audit Events, and no Jolokia (servlet-only).
 
-## <span style="color:hsl(171,80%,58%)">6. 🧪 Tests</span>
+**SBA views and the endpoint behind each:**
 
-Each microservice module has:
+| SBA view / action          | Endpoint              | Modules                             | Backed by                                                                             |
+|----------------------------|-----------------------|-------------------------------------|---------------------------------------------------------------------------------------|
+| Logfile                    | `logfile`             | all                                 | `logging.file.name: logs/<app>.log`                                                   |
+| Heap Dump                  | `heapdump`            | all                                 | `management.endpoint.heapdump.access: unrestricted` (Boot 3.5+ defaults to `none`)    |
+| Caches                     | `caches`              | order                               | Caffeine, `expireAfterWrite=10m`                                                      |
+| Scheduled Tasks            | `scheduledtasks`      | order                               | `OrderCacheRefresher` every 5 min                                                     |
+| Flyway                     | `flyway`              | order                               | `db/migration/V1..V3`                                                                 |
+| HTTP Exchanges             | `httpexchanges`       | all                                 | `InMemoryHttpExchangeRepository`                                                      |
+| Startup                    | `startup`             | all                                 | `BufferingApplicationStartup` in `main()` (absent in tests)                           |
+| Audit Events               | `auditevents`         | all                                 | `InMemoryAuditEventRepository` + Spring Security login events                         |
+| Sessions                   | `sessions`            | order                               | Spring Session JDBC (Postgres); log in via `/login` to create one                     |
+| JMX                        | `jolokia`             | servlet modules (not gateway/admin) | `jolokia-support-springboot` 2.6.3                                                    |
+| SBOM                       | `sbom`                | all                                 | root `cyclonedx-maven-plugin` → `META-INF/sbom/application.cdx.json`                  |
+| Quartz                     | `quartz`              | all                                 | demo `HeartbeatJob`, every minute, in-memory store                                    |
+| Health (custom + probes)   | `health`              | all (custom indicators: order)      | `probes.enabled` → liveness/readiness groups; order adds `ordersCache`, `userService` |
+| Info                       | `info`                | all                                 | `info.app.*` + `management.info.java/os/process/env.enabled`                          |
+| Tags                       | — (Eureka metadata)   | all                                 | `metadata-map.tags.environment` (`APP_ENV`) / `tags.tier` → badges                    |
+| Custom metrics             | `metrics`             | order                               | `orders.cache.refresh` timer, `orders.db.reads{op}` counter                           |
+| Shutdown / Restart         | `shutdown`, `restart` | all                                 | `access: unrestricted`; restart from Spring Cloud Context                             |
+| Environment edit + Refresh | `env` POST, `refresh` | all                                 | `management.endpoint.env.post.enabled: true`                                          |
 
-- **Unit tests** (`*ControllerTest`) — [`@WebMvcTest`][WebMvcTest] + [`MockMvc`][MockMvc], no Spring
-  context beyond the web layer, no network/Eureka involved.
-- **Integration tests** (`*ApplicationIT`) — [`@SpringBootTest`][SpringBootTest] with a random
-  port + [`RestTestClient`][RestTestClient] (`gateway-service`: [`WebTestClient`][WebTestClient]), hitting
-  the real embedded server and the actuator health endpoint. `eureka.client.enabled=false` in
-  `src/test/resources/application-test.yml` so tests don't need a live Eureka
-  server.
+- ***Shutdown, restart, env POST and Jolokia mutate the running app*** — fine here behind Basic auth; never expose them
+  on a public port.
 
-`eureka-server` has its own `@SpringBootTest` that boots the registry and
-asserts the dashboard and health endpoint respond.
+<a id="https"></a>
 
-Run all tests: `mvn clean verify` (failsafe plugin from `super-pom` runs the
-`*IT` classes in the `integration-test` phase; surefire runs `*Test` in the
-`test` phase).
+## <span style="color:hsl(45,80%,55%)">9. 🔒 HTTPS between services (SSL bundles)</span>
+
+The registry, `order-service` and `product-service` serve ***HTTPS only***. Every call that reaches them — Eureka
+registration, heartbeats and registry fetches from every module, peer replication between registry nodes, Spring Boot
+Admin polling, gateway routing — runs over TLS and verifies the server certificate against a private dev CA. All key
+and trust material is wired through Spring Boot ***SSL bundles*** (`spring.ssl.bundle.*`); where a library can't read
+a bundle, a small bean hands it the bundle's `SSLContext`.
+
+| Caller → callee                                  | Scheme    | Who trusts the CA, and how                                                                                              |
+|--------------------------------------------------|-----------|-------------------------------------------------------------------------------------------------------------------------|
+| every Eureka client → `eureka-server` (8761–8763) | **https** | bundle `trust` → `RestClientDiscoveryClientOptionalArgs` ([`EurekaClientTlsConfig`](order-service/src/main/java/com/learning/discovery/order/config/EurekaClientTlsConfig.java), one per module) |
+| `eureka-server` → its peers (own client + replication) | **https** | bundle `trust` → `Jersey3DiscoveryClientOptionalArgs` + custom `PeerEurekaNodes` ([`EurekaTlsConfig`](eureka-server/src/main/java/com/learning/discovery/eureka/config/EurekaTlsConfig.java)) |
+| `admin-server` (SBA) → order, product, eureka actuators | **https** | bundle `trust` → `spring.http.clients.ssl.bundle` (Boot's `WebClient.Builder`, which SBA builds its `InstanceWebClient` from) |
+| `gateway-service` → order, product (`lb://`)      | **https** | bundle `trust` → `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle`                                         |
+| `zipkin-server` → `eureka-server`                 | **https** | JVM default trust store set from `tls/truststore.p12` at startup ([`DevCaTrust`](zipkin-server/src/main/java/com/learning/discovery/zipkin/DevCaTrust.java)) |
+| SBA / gateway → user-service, gateway, admin      | http      | unchanged: those three still serve plain HTTP                                                                           |
+| `order-service` → `user-service` (`UserClient`)   | http      | unchanged                                                                                                                |
+| browser / curl → gateway `:8080`, SBA `:8084`     | http      | unchanged (edge TLS is a separate step, see the end of this section)                                                     |
+
+```mermaid
+flowchart LR
+    subgraph TLS["serve HTTPS (bundle: server)"]
+        E1["eureka peer1 :8761"]
+        E2["eureka peer2 :8762"]
+        O["order-service :8082"]
+        P["product-service :8083"]
+    end
+    U["user-service :8081"] -- "register / renew / fetch (https)" --> E1
+    G["gateway :8080"] -- "register / fetch (https)" --> E2
+    G -- "lb://ORDER-SERVICE → https://127.0.0.1:8082" --> O
+    G -- "lb://PRODUCT-SERVICE → https" --> P
+    A["admin-server :8084"] -- "poll /actuator (https)" --> O
+    A -- "poll /actuator (https)" --> P
+    A -- "poll /actuator (https)" --> E1
+    O -- "register / renew (https)" --> E1
+    P -- "register / renew (https)" --> E2
+    E1 <-- "replication (https)" --> E2
+    Z["zipkin-server :9411"] -- "register (https)" --> E1
+    O -- "UserClient (http)" --> U
+```
+
+### What it takes to convert HTTP to HTTPS — step by step
+
+Each step names what changed in this repo; in another project the same ten steps apply.
+
+1. ***Create a CA and a server certificate*** — [`certs/generate-certs.sh`](certs/generate-certs.sh) (run once, rerun
+   to rotate):
+
+   ```bash
+   ./certs/generate-certs.sh          # EXTRA_SAN="DNS:my.host,IP:10.0.0.5" to add names
+   ```
+
+   It writes `server.p12` (certificate + key, alias `server`) into the modules that *serve* TLS and `truststore.p12`
+   (the CA only) into every module that *calls* an `https://` URL, under `src/main/resources/tls/`; the CA key stays
+   in `certs/out/` (git-ignored). The certificate's ***SubjectAltName must list every host a caller puts in a URL***:
+   `localhost`, `127.0.0.1`, `127.0.0.2` (the three registry nodes; step 4 pins order/product to `127.0.0.1`).
+   Hostname verification is on everywhere; a missing name fails with
+   `No subject alternative names matching IP address 192.168.0.12 found`.
+2. ***Declare SSL bundles*** in each `application.yml` — `server` (key store) where the module serves TLS, `trust`
+   (trust store) where it calls TLS:
+
+   ```yaml
+   spring:
+     ssl:
+       bundle:
+         jks:
+           server:
+             key:
+               alias: server
+             keystore:
+               location: classpath:tls/server.p12
+               password: ${TLS_KEYSTORE_PASSWORD:changeit}
+               type: PKCS12
+           trust:
+             truststore:
+               location: classpath:tls/truststore.p12
+               password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
+               type: PKCS12
+   ```
+3. ***Serve HTTPS*** (eureka-server, order-service, product-service) — one line; the port stays the same and stops
+   speaking plain HTTP (an `http://` request gets `400 Bad Request`):
+
+   ```yaml
+   server:
+     ssl:
+       bundle: server
+   ```
+4. ***Advertise HTTPS in the registry*** — callers never see `server.ssl`; they build URLs from the `InstanceInfo`
+   in Eureka. order/product (and the registry nodes, so SBA polls them over TLS) register:
+
+   ```yaml
+   eureka:
+     instance:
+       secure-port-enabled: true        # securePort = server.port; isSecure() → https:// URIs
+       non-secure-port-enabled: false
+       ip-address: ${EUREKA_INSTANCE_IP:127.0.0.1}   # order/product only: a host that is in the SAN
+   ```
+
+   With `secure-port-enabled`, Spring Cloud also publishes `secureHealthCheckUrl` (`https://…/actuator/health`), which
+   SBA's `EurekaServiceInstanceConverter` prefers, and `EurekaServiceInstance.getUri()` returns `https://host:securePort`,
+   which the gateway's `lb://` resolution and SBA's management URL use. Without `ip-address` the instance registers
+   its LAN IP (`prefer-ip-address: true`), which isn't in the certificate.
+5. ***Point every Eureka client at `https://`*** — `defaultZone: https://user:pass@${eureka.server.instances[n]}/eureka/`
+   in all six Spring modules, and `zipkin.discovery.eureka.service-url` in zipkin-server.
+6. ***Make the Eureka client trust the CA*** — it does **not** read `spring.ssl.bundle.*`, only its own
+   `eureka.client.tls.*` key/trust-store files, and its RestClient transport replaces the request factory of the
+   `RestClient.Builder` it gets, so `spring.http.clients.ssl.bundle` never reaches it. The hook its own TLS support
+   uses is the `SSLContext` on the optional-args bean, so each client module declares:
+
+   ```java
+   @Bean
+   RestClientDiscoveryClientOptionalArgs restClientDiscoveryClientOptionalArgs(SslBundles sslBundles,
+           EurekaClientHttpRequestFactorySupplier requestFactorySupplier,
+           ObjectProvider<RestClient.Builder> restClientBuilder) {
+       var args = new RestClientDiscoveryClientOptionalArgs(requestFactorySupplier,
+               () -> restClientBuilder.getIfAvailable(RestClient::builder));
+       args.setSSLContext(sslBundles.getBundle("trust").createSslContext());
+       return args;                  // the auto-configured one backs off (@ConditionalOnMissingBean)
+   }
+   ```
+
+   `DiscoveryClient` passes that `SSLContext` to `RestClientTransportClientFactories`, which builds an Apache
+   HttpClient 5 connection manager with it (default hostname verifier).
+7. ***Registry nodes: own client and peer replication*** — on the server classpath the node's own Eureka client uses
+   Jersey, so `EurekaTlsConfig` sets the bundle's `SSLContext` on `Jersey3DiscoveryClientOptionalArgs`. Replication is
+   harder: Spring Cloud's `RefreshablePeerEurekaNodes` builds each peer's Jersey client with the JVM default trust
+   store (cacerts) unless `-Dcom.netflix.eureka.shouldSSLConnectionsUseSystemSocketFactory=true` plus
+   `javax.net.ssl.trustStore` are set. `EurekaTlsConfig` replaces the `PeerEurekaNodes` bean (the auto-configured one
+   is `@ConditionalOnMissingBean`) with one that builds the same Jersey client — Apache connector, peer timeouts and
+   pool sizes, gzip and identity filters — on an `SSLConnectionSocketFactory(sslContext)`. Trade-off: peer URLs are no
+   longer re-read on `/actuator/refresh`; the 10-minute peer-list update still runs. Details in the
+   [eureka-server README](eureka-server/README.md#https).
+8. ***Every other caller of a TLS service***:
+   - ***gateway*** — `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle: trust`. The load-balancer
+     filter picks `https` itself (`LoadBalancerUriTools.reconstructURI` uses `ServiceInstance.isSecure()`), so routes
+     stay `lb://ORDER-SERVICE`.
+   - ***Spring Boot Admin*** — `spring.http.clients.ssl.bundle: trust`. SBA's `AdminServerInstanceWebClientConfiguration`
+     builds `InstanceWebClient` from Boot's `WebClient.Builder`, whose connector gets the bundle. Covers status polling,
+     endpoint detection, info, and every proxied detail view. Details in the
+     [admin-server README](admin-server/README.md#https).
+   - ***zipkin-server*** — no bundle hook (Zipkin disables Boot auto-configuration; Armeria's
+     `EurekaUpdatingListener` has no TLS setting). [`DevCaTrust`](zipkin-server/src/main/java/com/learning/discovery/zipkin/DevCaTrust.java)
+     copies `tls/truststore.p12` to a temp file and sets `javax.net.ssl.trustStore` before Zipkin starts; Netty's TLS
+     client falls back to the JDK default trust managers, which read it.
+9. ***Tests*** — the integration tests call the embedded server over plain HTTP, so order/product
+   `application-test.yml` and `EurekaServerApplicationTests` set `server.ssl.enabled: false`.
+   [`EurekaTlsTests`](eureka-server/src/test/java/com/learning/discovery/eureka/EurekaTlsTests.java) keeps TLS on and
+   checks that a client trusting the `trust` bundle gets `200` from `https://localhost:<port>/eureka/apps`, that the
+   JDK's default trust store gets an `SSLHandshakeException`, and that the TLS-aware `PeerEurekaNodes` is in place.
+10. ***Verify***:
+
+    ```bash
+    CA=certs/out/ca.crt
+    curl --cacert $CA -u admin:admin -H 'Accept: application/json' https://localhost:8761/eureka/apps   # registry
+    curl --cacert $CA https://127.0.0.1:8082/actuator/health                                            # order
+    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8082/actuator/health                      # 400: TLS only
+    curl -u admin:admin http://localhost:8080/api/orders                                                # gateway → https
+    openssl s_client -connect localhost:8761 -CAfile $CA </dev/null | grep -E 'Verify return|subject='  # handshake
+    ```
+
+    In the registry, order/product show `securePort … enabled=true`, `port … enabled=false` and an `https://`
+    `secureHealthCheckUrl`; on each dashboard *DS Replicas* still lists the other nodes (replication works over TLS);
+    SBA shows every instance `UP` with `https://` health URLs for order, product and the registry nodes.
+
+### Gotchas
+
+- ***Browsers warn on the dashboards*** (`https://localhost:8761`, Swagger UI on 8082/8083) until you import
+  `certs/out/ca.crt` as a trusted authority, or click through.
+- ***`PKIX path building failed` / `unable to find valid certification path`*** — the caller doesn't trust the CA:
+  missing `trust` bundle, stale `truststore.p12` after rerunning the script (it creates a new CA; rebuild and restart
+  everything), or a caller that bypasses the bundle (step 6–8).
+- ***`No subject alternative names matching …`*** — the URL host isn't in the SAN: usually an instance that registered
+  its LAN IP. Set `eureka.instance.ip-address`, or regenerate with `EXTRA_SAN`.
+- ***Eureka dashboard "Status" links for order/product point at `http://`*** — Spring Cloud's
+  `DefaultManagementMetadataProvider` always builds `statusPageUrl` with `http`, even with `secure-port-enabled`; only
+  the health-check URL gets an `https` twin. Cosmetic: nothing routes through it.
+- ***`Cannot clean connections … Client instance has been closed`*** at registry shutdown — an upstream race in
+  `EurekaJersey3ClientImpl.destroyResources()` (the cleaner runs after the client closes); same with Spring Cloud's own
+  peer clients. Harmless.
+- ***Same port, new scheme*** — anything with a hard-coded `http://localhost:8082` (bookmarks, Postman, the load test
+  if pointed at a service directly) now gets `400`.
+- ***Rotation*** — Tomcat can pick up a renewed key store without a restart
+  (`spring.ssl.bundle.jks.server.reload-on-update: true` plus `spring.ssl.bundle.watch.file.quiet-period`), but only
+  for `file:` locations (a `classpath:` store inside the jar can't be watched, as here), and the
+  client side here creates its `SSLContext` once at startup (Eureka optional args, peer nodes), so rotating the
+  ***CA*** still means a rolling restart. Issue new server certificates from the same CA to avoid that.
+
+### Beyond this demo
+
+- ***Edge TLS*** — gateway and SBA still listen on plain HTTP; add `server.ssl.bundle` to them (and `https` to the
+  SBA/gateway registrations) the same way.
+- ***Mutual TLS*** — add a key store to the `trust` bundle on callers and `server.ssl.client-auth: need` plus a
+  trust store on servers; then a stolen Basic credential alone no longer reaches the registry or actuators.
+- ***Real certificates*** — in Kubernetes, cert-manager (or a service mesh doing mTLS transparently) replaces the
+  script; in a VM fleet, an internal CA (Vault PKI, ACME) with short-lived certs plus `reload-on-update`.
+
+<a id="actuator-endpoints"></a>
+
+## <span style="color:hsl(170,80%,58%)">10. 📡 Actuator endpoints</span>
+
+Every endpoint Spring Boot Actuator (Boot 4.x, as of 2026) and Spring Cloud can expose, and which module exposes it over
+HTTP here (`management.endpoints.web.exposure.include` in each `application.yml`). ✅ = exposed, — = not exposed. All
+of them sit behind HTTP Basic except `health` and `info`; see [§8](#security-and-sba-features) for the SBA view each
+one feeds.
+
+- ***Boot's own default*** — over HTTP only `health` is exposed; every endpoint except `shutdown` and `heapdump` is
+  accessible once exposed (both need `management.endpoint.<id>.access: unrestricted`; `heapdump` since Boot 3.5).
+- ***`eureka`*** — `eureka-server`: one list for every node (`peer1`, `peer2`, `peer3`).
+- ***`zipkin-server`*** is not in the table: it runs Zipkin's own server (it registers in Eureka as `zipkin-server`
+  through `zipkin.discovery.eureka`), not Spring Boot Actuator.
+
+**Spring Boot Actuator:**
+
+| Endpoint           | What it shows / does                                                                   | Needs                                      | eureka    | admin | gateway | user | product | order |
+|--------------------|----------------------------------------------------------------------------------------|--------------------------------------------|-----------|-------|---------|------|---------|-------|
+| `health`           | App health with details and groups (`liveness`, `readiness`)                           | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `info`             | App info: `info.*`, build, git, java, os, process                                      | contributors via `management.info.*`       | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `metrics`          | Micrometer metrics; `/metrics/{name}` for one                                          | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `prometheus`       | Metrics in Prometheus scrape format                                                    | `micrometer-registry-prometheus`           | —         | —     | —       | —    | —       | —     |
+| `env`              | Property sources and resolved values (masked by default); POST edits with Spring Cloud | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `configprops`      | `@ConfigurationProperties` beans and values (masked by default)                        | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `beans`            | All beans in the context                                                               | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `conditions`       | Auto-configuration report: what matched or not, and why                                | —                                          | —         | —     | —       | —    | —       | —     |
+| `mappings`         | All request mappings / router functions                                                | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `loggers`          | View and change log levels at runtime                                                  | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `logfile`          | Log file contents (byte ranges)                                                        | `logging.file.name` / `path`               | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `threaddump`       | Thread dump                                                                            | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `heapdump`         | Heap dump download (`.hprof`); contains secrets                                        | HotSpot JVM                                | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `scheduledtasks`   | `@Scheduled` tasks                                                                     | —                                          | —         | —     | —       | —    | —       | ✅     |
+| `caches`           | Cache managers and caches; evict                                                       | a `CacheManager`                           | —         | —     | —       | —    | —       | ✅     |
+| `httpexchanges`    | Recent HTTP requests and responses                                                     | `HttpExchangeRepository` bean              | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `auditevents`      | Security audit events (logins, failures)                                               | `AuditEventRepository` bean                | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `sessions`         | Spring Session sessions; list and delete                                               | Spring Session                             | —         | —     | —       | —    | —       | ✅     |
+| `startup`          | Startup steps and timings                                                              | `BufferingApplicationStartup`              | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `sbom`             | Software bill of materials                                                             | CycloneDX file in `META-INF/sbom`          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `flyway`           | Applied Flyway migrations                                                              | Flyway                                     | —         | —     | —       | —    | —       | ✅     |
+| `liquibase`        | Applied Liquibase changesets                                                           | Liquibase                                  | —         | —     | —       | —    | —       | —     |
+| `quartz`           | Quartz jobs and triggers                                                               | Quartz                                     | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `integrationgraph` | Spring Integration component graph                                                     | Spring Integration                         | —         | —     | —       | —    | —       | —     |
+| `shutdown`         | Graceful shutdown (POST)                                                               | off until `access: unrestricted`           | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `jolokia`          | JMX over HTTP                                                                          | `jolokia-support-springboot`, servlet only | ✅         | —     | —       | ✅    | ✅       | ✅     |
+
+**Spring Cloud** (present when the dependency is on the classpath):
+
+| Endpoint          | What it shows / does                                        | Needs                       | eureka    | admin | gateway | user | product | order |
+|-------------------|-------------------------------------------------------------|-----------------------------|-----------|-------|---------|------|---------|-------|
+| `refresh`         | Re-bind `@RefreshScope` / `@ConfigurationProperties` (POST) | Spring Cloud Context        | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `restart`         | Restart the context (POST)                                  | Spring Cloud Context        | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
+| `pause`           | Stop the context lifecycle (POST)                           | Spring Cloud Context        | —         | —     | —       | —    | —       | —     |
+| `resume`          | Start it again (POST)                                       | Spring Cloud Context        | —         | —     | —       | —    | —       | —     |
+| `features`        | Spring Cloud features in use                                | Spring Cloud Commons        | —         | —     | —       | —    | —       | —     |
+| `serviceregistry` | Get/set this instance's registration status                 | a service registry (Eureka) | —         | —     | —       | —    | —       | —     |
+| `gateway`         | Routes, predicates, filters; refresh, add, delete routes    | Spring Cloud Gateway        | —         | —     | ✅       | —    | —       | —     |
+| `busrefresh`      | Broadcast refresh to all instances                          | Spring Cloud Bus            | —         | —     | —       | —    | —       | —     |
+| `busenv`          | Broadcast an env change to all instances                    | Spring Cloud Bus            | —         | —     | —       | —    | —       | —     |
+
+- ***Not exposed anywhere here*** — `prometheus` (metrics are read on demand through `metrics` / SBA; OTLP exports traces only),
+  `conditions`, `liquibase`, `integrationgraph`, `pause`/`resume`, `features`, `serviceregistry` and the Bus endpoints;
+  add the name to `exposure.include` to turn one on.
+- ***Module-specific endpoints*** — `caches`, `scheduledtasks`, `sessions`: only `order-service` has a cache, a
+  scheduler and Spring Session. `flyway`: user, product and order all migrate with Flyway, but only `order-service`
+  exposes the endpoint. `gateway`: only `gateway-service` runs Spring Cloud Gateway (SBA → Web →
+  Gateway). `jolokia`: servlet modules only (WebFlux `admin-server` and `gateway-service` can't run it).
+
+<a id="where-this-fits"></a>
+
+## <span style="color:hsl(86,80%,58%)">11. 🗺️ Where this fits: Spring Cloud/Netflix OSS vs Kubernetes</span>
+
+This repo demonstrates the **Spring Cloud & Netflix OSS** column below —
+`eureka-server` for service discovery and `gateway-service` for the API
+gateway. Kubernetes solves the same concerns natively, which is why
+Spring-Cloud-style discovery/gateway stacks are far less common in
+Kubernetes-native shops.
+
+![Microservices concerns: Spring Cloud/Netflix OSS vs Kubernetes](docs/images/microservices-concerns-comparison.png)
+
+| Microservices Concern              | Spring Cloud & Netflix OSS              | Kubernetes                                         |
+|------------------------------------|-----------------------------------------|----------------------------------------------------|
+| Configuration Management           | Config Server, Consul, Netflix Archaius | Kubernetes ConfigMap & Secrets                     |
+| Service Discovery                  | Netflix Eureka, Hashicorp Consul        | Kubernetes Service & Ingress Resources             |
+| Load Balancing                     | Netflix Ribbon                          | Kubernetes Service                                 |
+| API Gateway                        | Netflix Zuul                            | Kubernetes Service & Ingress Resources             |
+| Service Security                   | Spring Cloud Security                   | —                                                  |
+| Centralized Logging                | ELK Stack (LogStash)                    | EFK Stack (Fluentd)                                |
+| Centralized Metrics                | Netflix Spectator & Atlas               | Heapster, Prometheus, Grafana                      |
+| Distributed Tracing                | Spring Cloud Sleuth, Zipkin             | OpenTracing, Zipkin                                |
+| Resilience & Fault Tolerance       | Netflix Hystrix, Turbine & Ribbon       | Kubernetes Health Check & resource isolation       |
+| Auto Scaling & Self Healing        | —                                       | Kubernetes Health Check, Self Healing, Autoscaling |
+| Packaging, Deployment & Scheduling | Spring Boot                             | Docker/Rkt, Kubernetes Scheduler & Deployment      |
+| Job Management                     | Spring Batch                            | Kubernetes Jobs & Scheduled Jobs                   |
+| Singleton Application              | Spring Cloud Cluster                    | Kubernetes Pods                                    |
 
 <a id="faq"></a>
 
-## <span style="color:hsl(308,80%,58%)">7. ❓ FAQ</span>
+## <span style="color:hsl(308,80%,58%)">12. ❓ FAQ</span>
 
 <a id="faq-port-change"></a>
 
@@ -394,7 +787,7 @@ sticky sessions, no weighting. Only instances Eureka reports as `UP` are
 handed to the load balancer; the gateway does not itself health-check
 instances before forwarding (`spring.cloud.loadbalancer.health-check.enabled`
 would add that if needed). See the diagram in
-[§2](#how-the-gateway-finds-services-via-eureka).
+[§6](#how-the-gateway-finds-services-via-eureka).
 
 <a id="faq-gateway-cache"></a>
 
@@ -554,7 +947,7 @@ would you redesign it?**
 | Transport          | HTTP                                    | TLS at the edge at minimum; mTLS inside without a mesh                                                                     |
 
 - ***Interview point*** — registry metadata is ***discovery data, not a secret store***: assume every client can read
-  all of it. Related: [§10](#security-and-sba-features).
+  all of it. Related: [§8](#security-and-sba-features).
 
 <a id="faq-slow-downstream-cascade"></a>
 
@@ -595,7 +988,7 @@ Delete the plain one: why does Eureka registration break, and what else silently
 
 ***Eureka's own HTTP client becomes load-balanced***: Spring Cloud Netflix builds its `RestClient` transport from an
 unqualified `RestClient.Builder` lookup, so with only the `@LoadBalanced` builder left, the call to
-`http://localhost:8761/eureka/` treats `localhost` as a service ID.
+`https://localhost:8761/eureka/` treats `localhost` as a service ID.
 
 - ***Chicken-and-egg*** — resolving `localhost` needs the registry (no instances under that ID), but fetching the
   registry goes through that same client. Register, renew and fetch all fail; the instance never shows up and
@@ -676,7 +1069,7 @@ sequenceDiagram
 - ***On Kubernetes*** the same idea is a `preStop` hook that marks OUT_OF_SERVICE and sleeps past the cache window
   before SIGTERM arrives.
 - ***Monitor*** — gateway 5xx per route during deploys, a counter on the `user: null` path, Eureka renews per minute
-  (a drop mid-deploy means instances left without cancelling). Window arithmetic: [7.9](#faq-worst-case-detection).
+  (a drop mid-deploy means instances left without cancelling). Window arithmetic: [12.9](#faq-worst-case-detection).
 
 <a id="faq-migrate-to-kubernetes"></a>
 
@@ -705,7 +1098,7 @@ swapping the discovery backend is a dependency/config change per module, not a c
      the first non-empty answer, letting callers prefer Kubernetes and fall back to Eureka for not-yet-moved services.
   3. ***Probes*** — map Boot's `/actuator/health/liveness` and `/readiness` (already on: `probes.enabled: true`) to
      Kubernetes probes; readiness + Endpoints removal replace the OUT_OF_SERVICE dance from
-     [7.13](#faq-zero-error-rolling-deploy) (still add a short `preStop` sleep for endpoint propagation).
+     [12.13](#faq-zero-error-rolling-deploy) (still add a short `preStop` sleep for endpoint propagation).
   4. ***Edge*** — keep Spring Cloud Gateway as an in-cluster Deployment behind an Ingress/Gateway API listener while
      it still adds value (auth, Swagger aggregation, per-route filters such as `SetPath`); replace it with
      Gateway API `HTTPRoute`s only when routes are plain path → Service with simple rewrites.
@@ -717,194 +1110,4 @@ swapping the discovery backend is a dependency/config change per module, not a c
 - ***Rollback*** — every step is a config flip (discovery client order, weighted DNS at the edge, a Deployment scaled
   back to VMs); keep the Eureka cluster running and the VM deploy pipeline intact until the end.
 - ***Trade-off to state out loud*** — option C is the simplest end state, but losing client-side LB means losing
-  "retry on the next instance"; add that back via a mesh or keep B. Background: [§8](#where-this-fits).
-
-<a id="where-this-fits"></a>
-
-## <span style="color:hsl(86,80%,58%)">8. 🗺️ Where this fits: Spring Cloud/Netflix OSS vs Kubernetes</span>
-
-This repo demonstrates the **Spring Cloud & Netflix OSS** column below —
-`eureka-server` for service discovery and `gateway-service` for the API
-gateway. Kubernetes solves the same concerns natively, which is why
-Spring-Cloud-style discovery/gateway stacks are far less common in
-Kubernetes-native shops.
-
-![Microservices concerns: Spring Cloud/Netflix OSS vs Kubernetes](docs/images/microservices-concerns-comparison.png)
-
-| Microservices Concern              | Spring Cloud & Netflix OSS              | Kubernetes                                         |
-|------------------------------------|-----------------------------------------|----------------------------------------------------|
-| Configuration Management           | Config Server, Consul, Netflix Archaius | Kubernetes ConfigMap & Secrets                     |
-| Service Discovery                  | Netflix Eureka, Hashicorp Consul        | Kubernetes Service & Ingress Resources             |
-| Load Balancing                     | Netflix Ribbon                          | Kubernetes Service                                 |
-| API Gateway                        | Netflix Zuul                            | Kubernetes Service & Ingress Resources             |
-| Service Security                   | Spring Cloud Security                   | —                                                  |
-| Centralized Logging                | ELK Stack (LogStash)                    | EFK Stack (Fluentd)                                |
-| Centralized Metrics                | Netflix Spectator & Atlas               | Heapster, Prometheus, Grafana                      |
-| Distributed Tracing                | Spring Cloud Sleuth, Zipkin             | OpenTracing, Zipkin                                |
-| Resilience & Fault Tolerance       | Netflix Hystrix, Turbine & Ribbon       | Kubernetes Health Check & resource isolation       |
-| Auto Scaling & Self Healing        | —                                       | Kubernetes Health Check, Self Healing, Autoscaling |
-| Packaging, Deployment & Scheduling | Spring Boot                             | Docker/Rkt, Kubernetes Scheduler & Deployment      |
-| Job Management                     | Spring Batch                            | Kubernetes Jobs & Scheduled Jobs                   |
-| Singleton Application              | Spring Cloud Cluster                    | Kubernetes Pods                                    |
-
-<a id="virtual-ips-vip"></a>
-
-## <span style="color:hsl(223,80%,58%)">9. 🌐 Virtual IPs (VIP)</span>
-
-In Netflix Eureka, a Virtual IP (VIP) address is a logical identifier or
-virtual hostname assigned to a service instance, defaulting to the
-application name (`spring.application.name`).
-
-**What is a Virtual IP (VIP) in Eureka?**
-
-- **Logical name**: instead of pointing to a physical network IP address, a
-  VIP acts as a logical name (like `USER-SERVICE`) that clients use to
-  target a group of identical service instances.
-- **Default value**: by default, Spring Cloud Netflix Eureka sets the
-  virtual host (`vipAddress`) and secure virtual host (`secureVipAddress`)
-  to the value of `${spring.application.name}`.
-- **Load balancing**: clients use this virtual identifier to resolve where
-  requests should go, allowing Eureka and client-side load balancers (like
-  Ribbon or Spring Cloud LoadBalancer) to route traffic dynamically across
-  healthy instances.
-
-**How to configure VIP in Eureka**
-
-Override the default virtual IP settings in application properties if the
-logical identifier needs to differ from the application name:
-
-```yaml
-eureka:
-  instance:
-    virtual-host-name: custom-service-vip
-    secure-virtual-host-name: secure-custom-service-vip
-```
-
-<!-- Library classes mentioned above, linked to their source at the versions this project builds with. -->
-
-[DiscoveryClient]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-commons/src/main/java/org/springframework/cloud/client/discovery/DiscoveryClient.java
-[EurekaDiscoveryClient]: https://github.com/spring-cloud/spring-cloud-netflix/blob/v5.0.2/spring-cloud-netflix-eureka-client/src/main/java/org/springframework/cloud/netflix/eureka/EurekaDiscoveryClient.java
-[LoadBalanced]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-commons/src/main/java/org/springframework/cloud/client/loadbalancer/LoadBalanced.java
-[MockMvc]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-test/src/main/java/org/springframework/test/web/servlet/MockMvc.java
-[ReactiveLoadBalancerClientFilter]: https://github.com/spring-cloud/spring-cloud-gateway/blob/v5.0.3/spring-cloud-gateway-server-webflux/src/main/java/org/springframework/cloud/gateway/filter/ReactiveLoadBalancerClientFilter.java
-[ReactorServiceInstanceLoadBalancer]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-loadbalancer/src/main/java/org/springframework/cloud/loadbalancer/core/ReactorServiceInstanceLoadBalancer.java
-[RestClient]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-web/src/main/java/org/springframework/web/client/RestClient.java
-[RestClientException]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-web/src/main/java/org/springframework/web/client/RestClientException.java
-[RestTestClient]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-test/src/main/java/org/springframework/test/web/servlet/client/RestTestClient.java
-[RoundRobinLoadBalancer]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-loadbalancer/src/main/java/org/springframework/cloud/loadbalancer/core/RoundRobinLoadBalancer.java
-[ServiceInstanceListSupplier]: https://github.com/spring-cloud/spring-cloud-commons/blob/v5.0.3/spring-cloud-loadbalancer/src/main/java/org/springframework/cloud/loadbalancer/core/ServiceInstanceListSupplier.java
-[SpringBootTest]: https://github.com/spring-projects/spring-boot/blob/v4.1.1/core/spring-boot-test/src/main/java/org/springframework/boot/test/context/SpringBootTest.java
-[WebMvcTest]: https://github.com/spring-projects/spring-boot/blob/v4.1.1/module/spring-boot-webmvc-test/src/main/java/org/springframework/boot/webmvc/test/autoconfigure/WebMvcTest.java
-[WebTestClient]: https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-test/src/main/java/org/springframework/test/web/reactive/server/WebTestClient.java
-
-<a id="security-and-sba-features"></a>
-
-## <span style="color:hsl(0,80%,58%)">10. 🔐 Security and Spring Boot Admin features</span>
-
-**Security (as of 2026, Spring Boot 4.1 / SBA 4.1):**
-
-- ***One shared user per module*** — `spring.security.user` = `admin`/`admin` (`ACTUATOR_USER` / `ACTUATOR_PASSWORD`),
-  HTTP Basic everywhere; `/actuator/health/**` and `/actuator/info` stay public for probes.
-- ***Eureka needs credentials too*** — clients register via `http://admin:admin@localhost:8761/eureka/`; `eureka-server`
-  disables CSRF for `/eureka/**`.
-- ***SBA polls each actuator with metadata credentials*** — every instance publishes
-  `eureka.instance.metadata-map.user.name/user.password`; `admin-server` falls back to
-  `spring.boot.admin.instance-auth.default-*`.
-- ***Gateway forwards `Authorization`*** — call the gateway with Basic auth and the same header reaches the downstream
-  service; `order-service` adds Basic auth to its direct `user-service` call.
-- ***`admin-server` and `gateway-service` are WebFlux*** — reactive `SecurityWebFilterChain`, a wrapped authentication
-  manager publishes login events for Audit Events, and no Jolokia (servlet-only).
-
-**SBA views and the endpoint behind each:**
-
-| SBA view / action          | Endpoint              | Modules                             | Backed by                                                                             |
-|----------------------------|-----------------------|-------------------------------------|---------------------------------------------------------------------------------------|
-| Logfile                    | `logfile`             | all                                 | `logging.file.name: logs/<app>.log`                                                   |
-| Heap Dump                  | `heapdump`            | all                                 | `management.endpoint.heapdump.access: unrestricted` (Boot 3.5+ defaults to `none`)    |
-| Caches                     | `caches`              | order                               | Caffeine, `expireAfterWrite=10m`                                                      |
-| Scheduled Tasks            | `scheduledtasks`      | order                               | `OrderCacheRefresher` every 5 min                                                     |
-| Flyway                     | `flyway`              | order                               | `db/migration/V1..V3`                                                                 |
-| HTTP Exchanges             | `httpexchanges`       | all                                 | `InMemoryHttpExchangeRepository`                                                      |
-| Startup                    | `startup`             | all                                 | `BufferingApplicationStartup` in `main()` (absent in tests)                           |
-| Audit Events               | `auditevents`         | all                                 | `InMemoryAuditEventRepository` + Spring Security login events                         |
-| Sessions                   | `sessions`            | order                               | Spring Session JDBC (Postgres); log in via `/login` to create one                     |
-| JMX                        | `jolokia`             | servlet modules (not gateway/admin) | `jolokia-support-springboot` 2.6.3                                                    |
-| SBOM                       | `sbom`                | all                                 | root `cyclonedx-maven-plugin` → `META-INF/sbom/application.cdx.json`                  |
-| Quartz                     | `quartz`              | all                                 | demo `HeartbeatJob`, every minute, in-memory store                                    |
-| Health (custom + probes)   | `health`              | all (custom indicators: order)      | `probes.enabled` → liveness/readiness groups; order adds `ordersCache`, `userService` |
-| Info                       | `info`                | all                                 | `info.app.*` + `management.info.java/os/process/env.enabled`                          |
-| Tags                       | — (Eureka metadata)   | all                                 | `metadata-map.tags.environment` (`APP_ENV`) / `tags.tier` → badges                    |
-| Custom metrics             | `metrics`             | order                               | `orders.cache.refresh` timer, `orders.db.reads{op}` counter                           |
-| Shutdown / Restart         | `shutdown`, `restart` | all                                 | `access: unrestricted`; restart from Spring Cloud Context                             |
-| Environment edit + Refresh | `env` POST, `refresh` | all                                 | `management.endpoint.env.post.enabled: true`                                          |
-
-- ***Shutdown, restart, env POST and Jolokia mutate the running app*** — fine here behind Basic auth; never expose them
-  on a public port.
-
-<a id="actuator-endpoints"></a>
-
-## <span style="color:hsl(170,80%,58%)">11. 📡 Actuator endpoints</span>
-
-Every endpoint Spring Boot Actuator (Boot 4.x, as of 2026) and Spring Cloud can expose, and which module exposes it over
-HTTP here (`management.endpoints.web.exposure.include` in each `application.yml`). ✅ = exposed, — = not exposed. All
-of them sit behind HTTP Basic except `health` and `info`; see [§10](#security-and-sba-features) for the SBA view each
-one feeds.
-
-- ***Boot's own default*** — over HTTP only `health` is exposed; every endpoint except `shutdown` and `heapdump` is
-  accessible once exposed (both need `management.endpoint.<id>.access: unrestricted`; `heapdump` since Boot 3.5).
-- ***`eureka`*** — `eureka-server`: one list for every node (`peer1`, `peer2`, `peer3`).
-- ***`zipkin-server`*** is not in the table: it runs Zipkin's own server (it registers in Eureka as `zipkin-server`
-  through `zipkin.discovery.eureka`), not Spring Boot Actuator.
-
-**Spring Boot Actuator:**
-
-| Endpoint           | What it shows / does                                                                   | Needs                                      | eureka    | admin | gateway | user | product | order |
-|--------------------|----------------------------------------------------------------------------------------|--------------------------------------------|-----------|-------|---------|------|---------|-------|
-| `health`           | App health with details and groups (`liveness`, `readiness`)                           | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `info`             | App info: `info.*`, build, git, java, os, process                                      | contributors via `management.info.*`       | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `metrics`          | Micrometer metrics; `/metrics/{name}` for one                                          | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `prometheus`       | Metrics in Prometheus scrape format                                                    | `micrometer-registry-prometheus`           | —         | —     | —       | —    | —       | —     |
-| `env`              | Property sources and resolved values (masked by default); POST edits with Spring Cloud | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `configprops`      | `@ConfigurationProperties` beans and values (masked by default)                        | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `beans`            | All beans in the context                                                               | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `conditions`       | Auto-configuration report: what matched or not, and why                                | —                                          | —         | —     | —       | —    | —       | —     |
-| `mappings`         | All request mappings / router functions                                                | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `loggers`          | View and change log levels at runtime                                                  | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `logfile`          | Log file contents (byte ranges)                                                        | `logging.file.name` / `path`               | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `threaddump`       | Thread dump                                                                            | —                                          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `heapdump`         | Heap dump download (`.hprof`); contains secrets                                        | HotSpot JVM                                | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `scheduledtasks`   | `@Scheduled` tasks                                                                     | —                                          | —         | —     | —       | —    | —       | ✅     |
-| `caches`           | Cache managers and caches; evict                                                       | a `CacheManager`                           | —         | —     | —       | —    | —       | ✅     |
-| `httpexchanges`    | Recent HTTP requests and responses                                                     | `HttpExchangeRepository` bean              | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `auditevents`      | Security audit events (logins, failures)                                               | `AuditEventRepository` bean                | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `sessions`         | Spring Session sessions; list and delete                                               | Spring Session                             | —         | —     | —       | —    | —       | ✅     |
-| `startup`          | Startup steps and timings                                                              | `BufferingApplicationStartup`              | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `sbom`             | Software bill of materials                                                             | CycloneDX file in `META-INF/sbom`          | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `flyway`           | Applied Flyway migrations                                                              | Flyway                                     | —         | —     | —       | —    | —       | ✅     |
-| `liquibase`        | Applied Liquibase changesets                                                           | Liquibase                                  | —         | —     | —       | —    | —       | —     |
-| `quartz`           | Quartz jobs and triggers                                                               | Quartz                                     | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `integrationgraph` | Spring Integration component graph                                                     | Spring Integration                         | —         | —     | —       | —    | —       | —     |
-| `shutdown`         | Graceful shutdown (POST)                                                               | off until `access: unrestricted`           | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `jolokia`          | JMX over HTTP                                                                          | `jolokia-support-springboot`, servlet only | ✅         | —     | —       | ✅    | ✅       | ✅     |
-
-**Spring Cloud** (present when the dependency is on the classpath):
-
-| Endpoint          | What it shows / does                                        | Needs                       | eureka    | admin | gateway | user | product | order |
-|-------------------|-------------------------------------------------------------|-----------------------------|-----------|-------|---------|------|---------|-------|
-| `refresh`         | Re-bind `@RefreshScope` / `@ConfigurationProperties` (POST) | Spring Cloud Context        | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `restart`         | Restart the context (POST)                                  | Spring Cloud Context        | ✅         | ✅     | ✅       | ✅    | ✅       | ✅     |
-| `pause`           | Stop the context lifecycle (POST)                           | Spring Cloud Context        | —         | —     | —       | —    | —       | —     |
-| `resume`          | Start it again (POST)                                       | Spring Cloud Context        | —         | —     | —       | —    | —       | —     |
-| `features`        | Spring Cloud features in use                                | Spring Cloud Commons        | —         | —     | —       | —    | —       | —     |
-| `serviceregistry` | Get/set this instance's registration status                 | a service registry (Eureka) | —         | —     | —       | —    | —       | —     |
-| `gateway`         | Routes, predicates, filters; refresh, add, delete routes    | Spring Cloud Gateway        | —         | —     | ✅       | —    | —       | —     |
-| `busrefresh`      | Broadcast refresh to all instances                          | Spring Cloud Bus            | —         | —     | —       | —    | —       | —     |
-| `busenv`          | Broadcast an env change to all instances                    | Spring Cloud Bus            | —         | —     | —       | —    | —       | —     |
-
-- ***Not exposed anywhere here*** — `prometheus` (metrics are read on demand through `metrics` / SBA; OTLP exports traces only),
-  `conditions`, `liquibase`, `integrationgraph`, `pause`/`resume`, `features`, `serviceregistry` and the Bus endpoints;
-  add the name to `exposure.include` to turn one on.
-- ***Module-specific endpoints*** — `caches`, `scheduledtasks`, `sessions`: only `order-service` has a cache, a
-  scheduler and Spring Session. `flyway`: user, product and order all migrate with Flyway, but only `order-service`
-  exposes the endpoint. `gateway`: only `gateway-service` runs Spring Cloud Gateway (SBA → Web →
-  Gateway). `jolokia`: servlet modules only (WebFlux `admin-server` and `gateway-service` can't run it).
+  "retry on the next instance"; add that back via a mesh or keep B. Background: [§11](#where-this-fits).

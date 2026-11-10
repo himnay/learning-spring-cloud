@@ -1,10 +1,27 @@
 server:
   port: 8082
   shutdown: graceful   # Boot 3.4+ default, explicit here: finish in-flight requests (max spring.lifecycle.timeout-per-shutdown-phase, 30 s) before stopping
+  ssl:
+    bundle: server   # HTTPS only on this port; plain http:// requests get a 400
 
 spring:
   application:
     name: order-service
+  ssl:
+    bundle: # spring.ssl.bundle.jks.<name>: TLS material by name; certs/generate-certs.sh writes src/main/resources/tls/
+      jks:
+        server: # this process's certificate + private key; Tomcat serves HTTPS with it (server.ssl.bundle)
+          key:
+            alias: server
+          keystore:
+            location: classpath:tls/server.p12
+            password: ${TLS_KEYSTORE_PASSWORD:changeit}
+            type: PKCS12
+        trust: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig)
+          truststore:
+            location: classpath:tls/truststore.p12
+            password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
+            type: PKCS12
   docker:
     compose:
       file: order-service/docker-compose.yaml
@@ -44,13 +61,24 @@ app:
       - "/error"
 
 eureka:
+  server:
+    instances: # registry nodes, read by defaultZone below; same list in every module
+      - localhost:8761
+      - 127.0.0.1:8762
+      - 127.0.0.2:8763
   client:
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.1:8762/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.2:8763/eureka/
+      # one https:// URL per eureka.server.instances entry (every node serves TLS); Basic credentials go in each URL
+      defaultZone: https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[0]}/eureka/,https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[1]}/eureka/,https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[2]}/eureka/
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # evicted 30 s after the last heartbeat (default 90)
     prefer-ip-address: true
+    # registered as https://127.0.0.1:<port>: callers (gateway, SBA) build the URL from these, and verify the host
+    # against the certificate SAN (localhost, 127.0.0.1, 127.0.0.2). Without ip-address the LAN IP is registered.
+    ip-address: ${EUREKA_INSTANCE_IP:127.0.0.1}
+    secure-port-enabled: true        # InstanceInfo.securePort = server.port, isSecure() -> https:// URIs
+    non-secure-port-enabled: false   # nothing listens for plain HTTP
     metadata-map: # SBA reads these to authenticate its actuator polling
       user.name: ${spring.security.user.name}
       user.password: ${spring.security.user.password}

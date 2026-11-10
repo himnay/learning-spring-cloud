@@ -5,5 +5,6 @@ zipkin:
     eureka:
       # Registers as ZIPKIN-SERVER in eureka-server; same shared Basic credentials as the other modules.
       # A single URI (no comma list like the Spring clients' defaultZone): eureka-server peer1 (localhost:8761), which replicates to the other nodes.
-      service-url: ${EUREKA_SERVICE_URL:http://${ACTUATOR_USER:admin}:${ACTUATOR_PASSWORD:admin}@localhost:8761/eureka}
+      # https: the registry serves TLS only; the dev CA is trusted through DevCaTrust (JVM default trust store).
+      service-url: ${EUREKA_SERVICE_URL:https://${ACTUATOR_USER:admin}:${ACTUATOR_PASSWORD:admin}@localhost:8761/eureka}
       app-name: ${EUREKA_APP_NAME:zipkin-server}

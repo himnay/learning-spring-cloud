@@ -27,6 +27,12 @@ service-to-service call. Repo-wide context (module list, run order, parent/BOM
 chain, SBA feature matrix) lives in the root [../README.md](../README.md); this
 file only covers what is specific to this module.
 
+> 🔒 ***HTTPS only*** on `:8082` (`server.ssl.bundle: server`); registers in Eureka as `https://127.0.0.1:8082`
+> (`secure-port-enabled`, `ip-address`), and calls the registry over TLS through the `trust` bundle
+> ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/order/config/EurekaClientTlsConfig.java)). Its own call to
+> `user-service` stays HTTP. Run `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt`. Full guide:
+> root [§9](../README.md#https).
+
 <a id="overview"></a>
 
 ## <span style="color:hsl(330,80%,58%)">1. 🧭 Overview and REST API</span>
@@ -35,7 +41,7 @@ file only covers what is specific to this module.
   (`spring.application.name: order-service`, `prefer-ip-address: true`).
 - ***Stack (as of 2026)*** — Spring Boot 4.1 (`spring-boot-starter-webmvc`), Spring Cloud 2025.1 (Eureka client +
   LoadBalancer), Java 25+ style entry point (package-private class with a non-public `static void main`), all versions
-  inherited from the parent chain described in [../README.md §3](../README.md#parent--bom-chain).
+  inherited from the parent chain described in [../README.md §2](../README.md#parent--bom-chain).
 - ***Needs Docker*** — Postgres is started by `spring-boot-docker-compose` from this
   module's [docker-compose.yaml](docker-compose.yaml) (`user-service` and `product-service` do the same with their own
   file).
@@ -97,12 +103,13 @@ public record OrderWithUser(Order order, UserSummary user) {
   JDK client's default read timeout is infinite, so a hung upstream would otherwise pin a request thread.
 
 ```bash
-curl -u admin:admin http://localhost:8082/api/orders/101/with-user
+export CURL_CA_BUNDLE=certs/out/ca.crt   # dev CA: registry, order, product serve HTTPS (root README §9)
+curl -u admin:admin https://localhost:8082/api/orders/101/with-user
 # {"order":{"id":101,"userId":1,"product":"Keyboard","quantity":1},
 #  "user":{"id":1,"name":"...","email":"..."}}     <- "user":null if user-service is down
 ```
 
-- ***Swagger UI*** — http://localhost:8082/swagger-ui.html, spec at `/v3/api-docs` (both public).
+- ***Swagger UI*** — https://localhost:8082/swagger-ui.html, spec at `/v3/api-docs` (both public).
 - ***Banner*** — [banner.txt](src/main/resources/banner.txt) prints an ASCII "ORDER SVC" plus project metadata and the
   Swagger URL.
 
@@ -117,7 +124,7 @@ curl -u admin:admin http://localhost:8082/api/orders/101/with-user
   `localhost:5433/orders`), which only matters for `java -jar`, where the optional compose support isn't packaged.
 - ***Postgres 18 on host port 5433*** — DB/user/password all `orders`; `5433:5432` so it does not clash with another
   local Postgres on 5432.
-- ***Start Eureka first*** (see [../README.md §4](../README.md#run-order)) — order-service runs without it, but logs
+- ***Start Eureka first*** (see [../README.md §3](../README.md#run-order)) — order-service runs without it, but logs
   registration errors and `/with-user` cannot resolve `USER-SERVICE`.
 
 ```bash
@@ -149,13 +156,14 @@ mvn -pl order-service spring-boot:run
 | `ACTUATOR_PASSWORD` | `admin` | `spring.security.user.password` — same places                                                                       |
 
 ```bash
-curl -u admin:admin http://localhost:8082/api/orders
-curl -u admin:admin http://localhost:8082/api/orders/104
-curl -u admin:admin http://localhost:8082/api/orders/101/with-user
-curl                http://localhost:8082/actuator/health          # public
-curl -u admin:admin http://localhost:8082/actuator/caches
-curl -u admin:admin http://localhost:8082/actuator/scheduledtasks
-curl -u admin:admin http://localhost:8082/actuator/flyway
+export CURL_CA_BUNDLE=certs/out/ca.crt   # dev CA: registry, order, product serve HTTPS (root README §9)
+curl -u admin:admin https://localhost:8082/api/orders
+curl -u admin:admin https://localhost:8082/api/orders/104
+curl -u admin:admin https://localhost:8082/api/orders/101/with-user
+curl                https://localhost:8082/actuator/health          # public
+curl -u admin:admin https://localhost:8082/actuator/caches
+curl -u admin:admin https://localhost:8082/actuator/scheduledtasks
+curl -u admin:admin https://localhost:8082/actuator/flyway
 ```
 
 **Stopping the database:**
@@ -315,7 +323,7 @@ http
 - ***`spring-boot-starter-session-jdbc` replaces the servlet `HttpSession` with rows in Postgres*** (`SPRING_SESSION`,
   `SPRING_SESSION_ATTRIBUTES`, created by Flyway V3).
 - ***Basic-auth calls don't create sessions*** — Spring Security doesn't persist the context for Basic; ***log in
-  through http://localhost:8082/login*** in a browser to create one.
+  through https://localhost:8082/login*** in a browser to create one.
 - ***`/actuator/sessions` needs a `username` filter*** — `GET /actuator/sessions?username=admin`; SBA's Sessions view
   searches the same way (type the username), and can delete a session (which logs that browser out).
 - Sessions survive an app restart because they live in the DB, not in memory.
@@ -330,7 +338,7 @@ http
 **Outbound security** — Eureka registration uses `http://${user}:${pass}@…/eureka/` for each of the three registry
 nodes (`localhost:8761`, `127.0.0.1:8762`, `127.0.0.2:8763`), SBA reads
 `eureka.instance.metadata-map.user.name/user.password` to poll this instance's actuator, and `UserClient` sends Basic
-auth to `user-service`. Repo-wide picture: [../README.md §10](../README.md#security-and-sba-features).
+auth to `user-service`. Repo-wide picture: [../README.md §8](../README.md#security-and-sba-features).
 
 <a id="actuator"></a>
 
@@ -447,9 +455,11 @@ server:
   port: 8082
 
 eureka:
+  server:
+    instances: [ localhost:8761, 127.0.0.1:8762, 127.0.0.2:8763 ]   # registry nodes, same list in every module
   client:
     service-url:
-      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
+      defaultZone: http://${…}@${eureka.server.instances[0]}/eureka/,http://${…}@${eureka.server.instances[1]}/eureka/,http://${…}@${eureka.server.instances[2]}/eureka/
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # (default 90)
@@ -532,7 +542,7 @@ Docker still required):
 | Startup fails connecting to Docker                                                | Docker daemon not running                                                                                                                        | Start Docker; under `spring-boot:run`/IDE compose support aborts startup — the `DB_URL` fallback only applies to `java -jar` |
 | `401` on `/api/**` or actuator                                                    | Missing/wrong Basic credentials, or `ACTUATOR_USER/PASSWORD` set differently in this process vs. the caller                                      | `curl -u admin:admin …`; keep the env vars identical across all modules                                                  |
 | `/with-user` returns `"user": null`                                               | `user-service` down, not yet registered/fetched by Eureka (registry cache lag ~30 s), or rejected the credentials                                | Start `user-service`, wait for it in the Eureka dashboard, check its logs                                                |
-| SBA Sessions view empty                                                           | Only Basic-auth traffic so far — Basic creates no session                                                                                        | Log in at http://localhost:8082/login, then search username `admin`                                                      |
+| SBA Sessions view empty                                                           | Only Basic-auth traffic so far — Basic creates no session                                                                                        | Log in at https://localhost:8082/login,then search username `admin`                                                      |
 | SBA has no Startup view in tests                                                  | `BufferingApplicationStartup` is only set in `main()`                                                                                            | Expected                                                                                                                 |
 | Changed `orders.cache.refresh-interval` + `/actuator/refresh`, interval unchanged | `@Scheduled(fixedRateString=…)` is resolved once when the task is registered; refresh only re-binds `@ConfigurationProperties` / `@RefreshScope` | Restart the app (SBA "Restart" works)                                                                                    |
 | Deleted a row but `GET /api/orders/{id}` still returns it                         | Cache entry lives until its 10 m TTL after the last refresh                                                                                      | Wait ≤ 10 min, or clear the `orders` cache via SBA / `DELETE /actuator/caches/orders`                                    |
@@ -631,7 +641,7 @@ spring:
         simple:
           instances:
             order-service:
-              - uri: http://localhost:8082
+              - uri: https://localhost:8082
                 metadata:
                   user.name: admin
                   user.password: admin
@@ -797,7 +807,7 @@ and each instance has its own Caffeine cache.
 
 - ***Sync vs async validation*** — sync means order availability can never be higher than `user-service`
   availability (and the slow-dependency cascade from root
-  [FAQ 7.11](../README.md#faq-slow-downstream-cascade) now affects writes). Async (`PENDING` → `CONFIRMED`/`REJECTED`)
+  [FAQ 12.11](../README.md#faq-slow-downstream-cascade) now affects writes). Async (`PENDING` → `CONFIRMED`/`REJECTED`)
   keeps orders writable but pushes a state machine onto the client. A third option is a local read model of user ids
   fed by user events: fast and independent, but eventually consistent (a user deleted a second ago can still order).
 - ***Caches across 3 instances***:

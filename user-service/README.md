@@ -22,6 +22,10 @@ Eureka client exposing a read-only `/api/users` API. One of the 6 modules of the
 service-discovery demo — see the root [../README.md](../README.md) for the
 whole picture (Eureka, gateway, Spring Boot Admin, run order).
 
+> 🔒 user-service still serves plain HTTP (`:8081`), but registers, renews and fetches over ***HTTPS*** (`https://`
+> `defaultZone`, `trust` SSL bundle via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/user/config/EurekaClientTlsConfig.java)).
+> Full guide: root [§9](../README.md#https).
+
 <a id="overview"></a>
 
 ## <span style="color:hsl(288,80%,58%)">1. 🧩 Overview</span>
@@ -99,6 +103,7 @@ ACTUATOR_USER=ops ACTUATOR_PASSWORD=s3cret mvn -pl user-service spring-boot:run
 ### curl examples
 
 ```bash
+export CURL_CA_BUNDLE=certs/out/ca.crt   # dev CA: registry, order, product serve HTTPS (root README §9)
 # direct
 curl -u admin:admin http://localhost:8081/api/users
 curl -u admin:admin http://localhost:8081/api/users/2
@@ -110,7 +115,7 @@ curl http://localhost:8081/actuator/health                    # public
 curl -u admin:admin http://localhost:8080/api/users
 
 # via order-service, which calls user-service itself
-curl -u admin:admin http://localhost:8082/api/orders/1/with-user
+curl -u admin:admin https://localhost:8082/api/orders/1/with-user
 ```
 
 ### Two instances for the load-balancing demo
@@ -123,7 +128,7 @@ mvn -pl user-service spring-boot:run                                            
 mvn -pl user-service spring-boot:run -Dspring-boot.run.arguments=--server.port=8091
 ```
 
-- Eureka dashboard (http://localhost:8761) shows `USER-SERVICE` with 2 instances; repeated calls through the gateway or
+- Eureka dashboard (https://localhost:8761) shows `USER-SERVICE` with 2 instances; repeated calls through the gateway or
   `order-service` are spread ***round-robin*** by Spring Cloud LoadBalancer (watch both consoles / log files).
 - Allow up to ~30s for clients' registry caches to see the new instance.
 
@@ -133,9 +138,11 @@ mvn -pl user-service spring-boot:run -Dspring-boot.run.arguments=--server.port=8
 
 ```yaml
 eureka:
+  server:
+    instances: [ localhost:8761, 127.0.0.1:8762, 127.0.0.2:8763 ]   # registry nodes, same list in every module
   client:
     service-url:
-      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
+      defaultZone: http://${…}@${eureka.server.instances[0]}/eureka/,http://${…}@${eureka.server.instances[1]}/eureka/,http://${…}@${eureka.server.instances[2]}/eureka/
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # (default 90)
@@ -295,9 +302,11 @@ server:
   port: 8081
 
 eureka:
+  server:
+    instances: [ localhost:8761, 127.0.0.1:8762, 127.0.0.2:8763 ]   # registry nodes, same list in every module
   client:
     service-url:
-      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
+      defaultZone: http://${…}@${eureka.server.instances[0]}/eureka/,http://${…}@${eureka.server.instances[1]}/eureka/,http://${…}@${eureka.server.instances[2]}/eureka/
   instance:
     prefer-ip-address: true             # register IP, not hostname
     metadata-map:                       # SBA reads these to call /actuator
@@ -596,7 +605,7 @@ the gateway fix it, and how do you fix it in this service?**
   so a loop dumps every name and email. `GET /api/users` does it in one call.
 - ***Why the shared `admin` user hides it*** — today every caller is the same principal, so "own data" means
   nothing. The credential problem itself is covered in root
-  [FAQ 7.10](../README.md#faq-shared-credentials-blast-radius). Even after per-user tokens arrive, BOLA remains
+  [FAQ 12.10](../README.md#faq-shared-credentials-blast-radius). Even after per-user tokens arrive, BOLA remains
   unless the service checks ownership.
 - ***Why the gateway can't fix it*** — it matches paths, not ownership. Knowing that user 42 owns `/api/users/42`
   (or, later, an order) needs this service's data. Coarse rules belong at the edge; object rules belong in the

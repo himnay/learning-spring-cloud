@@ -1,3 +1,6 @@
+server:
+  ssl:
+    enabled: false   # tests call the embedded server over plain http://
 eureka:
   client:
     enabled: false   # unit/integration tests run without a live Eureka server

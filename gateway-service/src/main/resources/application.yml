@@ -5,6 +5,14 @@ server:
 spring:
   application:
     name: gateway-service
+  ssl:
+    bundle: # spring.ssl.bundle.jks.<name>: TLS material by name; certs/generate-certs.sh writes src/main/resources/tls/
+      jks:
+        trust: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig; routed calls: gateway httpclient.ssl.ssl-bundle)
+          truststore:
+            location: classpath:tls/truststore.p12
+            password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
+            type: PKCS12
   security:
     user:
       name: ${ACTUATOR_USER:admin}
@@ -16,6 +24,9 @@ spring:
     gateway:
       server:
         webflux:
+          httpclient:
+            ssl:
+              ssl-bundle: trust   # lb:// picks https for instances registered secure (order, product)
           # Authorization header is forwarded to downstream as-is (no RemoveRequestHeader filter) —
           # user/order/product services require the same Basic creds the client sent to the gateway.
           routes:
@@ -31,9 +42,6 @@ spring:
               uri: lb://PRODUCT-SERVICE
               predicates:
                 - Path=/api/products/**
-            # OpenAPI specs of the services, for the aggregated Swagger UI (springdoc.swagger-ui.urls below).
-            # Not under /v3/api-docs/**: springdoc's own handler (higher precedence than gateway routes)
-            # would treat the last segment as a group name.
             - id: user-service-api-docs
               uri: lb://USER-SERVICE
               predicates:
@@ -81,9 +89,15 @@ app:
       - "/error"
 
 eureka:
+  server:
+    instances: # registry nodes, read by defaultZone below; same list in every module
+      - localhost:8761
+      - 127.0.0.1:8762
+      - 127.0.0.2:8763
   client:
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.1:8762/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.2:8763/eureka/
+      # one https:// URL per eureka.server.instances entry (every node serves TLS); Basic credentials go in each URL
+      defaultZone: https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[0]}/eureka/,https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[1]}/eureka/,https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[2]}/eureka/
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # evicted 30 s after the last heartbeat (default 90)

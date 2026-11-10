@@ -22,6 +22,7 @@ public class ZipkinServerApplication {
     }
 
     static ConfigurableApplicationContext run(String... args) {
+        DevCaTrust.install(); // before any TLS client exists: Eureka is https:// (see DevCaTrust)
         return new SpringApplicationBuilder(ZipkinServerApplication.class)
                 .banner(new ZipkinBanner())
                 .initializers(new ZipkinModuleImporter(), new ZipkinActuatorImporter())

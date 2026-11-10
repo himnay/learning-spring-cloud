@@ -1,0 +1,35 @@
+package com.learning.discovery.user.config;
+
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBooleanProperty;
+import org.springframework.boot.ssl.SslBundles;
+import org.springframework.cloud.netflix.eureka.http.EurekaClientHttpRequestFactorySupplier;
+import org.springframework.cloud.netflix.eureka.http.RestClientDiscoveryClientOptionalArgs;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestClient;
+
+/**
+ * Eureka client over HTTPS: trusts the CA in the {@code trust} SSL bundle when it registers, renews and fetches
+ * the registry at the https:// URLs in eureka.client.service-url.defaultZone.
+ * <p>
+ * The Eureka client doesn't read {@code spring.ssl.bundle.*} (only {@code eureka.client.tls.*} key/trust-store
+ * files), and its RestClient transport replaces the request factory of the RestClient.Builder it is given, so
+ * {@code spring.http.clients.ssl.bundle} doesn't reach it either. The SSLContext on the optional-args bean is the
+ * hook its own TLS support uses: DiscoveryClient hands it to RestClientTransportClientFactories, which builds an
+ * Apache HttpClient 5 with it. The auto-configured bean backs off ({@code @ConditionalOnMissingBean}).
+ */
+@Configuration(proxyBeanMethods = false)
+@ConditionalOnBooleanProperty(name = "eureka.client.enabled", matchIfMissing = true)
+class EurekaClientTlsConfig {
+
+    @Bean
+    RestClientDiscoveryClientOptionalArgs restClientDiscoveryClientOptionalArgs(SslBundles sslBundles,
+            EurekaClientHttpRequestFactorySupplier requestFactorySupplier,
+            ObjectProvider<RestClient.Builder> restClientBuilder) {
+        RestClientDiscoveryClientOptionalArgs args = new RestClientDiscoveryClientOptionalArgs(
+                requestFactorySupplier, () -> restClientBuilder.getIfAvailable(RestClient::builder));
+        args.setSSLContext(sslBundles.getBundle("trust").createSslContext());
+        return args;
+    }
+}

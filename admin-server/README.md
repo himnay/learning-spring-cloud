@@ -6,26 +6,29 @@
 2. 🚀 [Run and log in](#run-and-login)
 3. 🔐 [Security in detail](#security)
 4. 🔑 [Types of supported security](#login-options)
-5. 📡 [Actuator endpoints exposed](#actuator-endpoints)
-6. ⏱️ [Quartz demo job](#quartz)
-7. 📝 [Logging to file](#logging)
-8. ⚙️ [Configuration reference](#configuration)
-9. 🔄 [Polling frequency](#polling)
-10. 🧪 [Tests](#tests)
-11. 🛠️ [Gotchas and troubleshooting](#gotchas)
-12. ❓ [Q&A](#qa)
-    - 12.1 [Does Spring Boot Admin poll, or do the clients push?](#qa-sba-poll-or-push)
-    - 12.2 [If we don't use Eureka, do we have to list each client in SBA?](#qa-without-eureka)
-    - 12.3 [So without Eureka it's a push from the client?](#qa-push-without-eureka)
-    - 12.4 [Does Eureka save SBA from calling every instance, by replacing those calls with one call to Eureka?](#qa-eureka-saves-calls)
-    - 12.5 [Can we avoid `spring-boot-admin-starter-client` in every service and rely on Eureka alone?](#qa-eureka-only)
-    - 12.6 [What are the `AuditEventRepository` and `HttpExchangeRepository` beans in `ActuatorConfig` for?](#qa-actuator-repositories)
-    - 12.7 [Can we use Basic auth to log in to the SBA UI but OAuth2 towards the backend services?](#qa-basic-ui-oauth-backend)
-    - 12.8 🔥 [`SecurityConfig` exempts `/instances/**` and `/actuator/**` from CSRF — what does a malicious page do with a logged-in SBA session, and how narrow should the exemption be?](#qa-csrf-exemption-scope)
-    - 12.9 🔥 [Someone clicks Heap Dump on a production `order-service` in SBA — what happens to that instance, its callers and the data?](#qa-heapdump-click-production)
-    - 12.10 🔥 [Why is SBA a weak primary alerting system, even after you add a notifier?](#qa-sba-as-alerting)
-    - 12.11 🔥🔥 [Run admin-server as two instances behind a load balancer — what breaks with this module's in-memory state, and is HA worth it at all?](#qa-sba-high-availability)
-    - 12.12 🔥🔥 [SBA suddenly shows the three Postgres-backed services OFFLINE, while Eureka shows them UP and the gateway serves traffic — debug it](#qa-mass-offline-debug)
+5. 🔒 [HTTPS to the registry and the services](#https)
+6. 📡 [Actuator endpoints exposed](#actuator-endpoints)
+7. ⏱️ [Quartz demo job](#quartz)
+8. 📝 [Logging to file](#logging)
+9. ⚙️ [Configuration reference](#configuration)
+10. 🔄 [Polling frequency](#polling)
+11. 🔬 [Internals: Spring Boot Admin 4.1 server and UI](#sba-internals) — modules, design, event sourcing, discovery/status sequence, polling loops, WebClient filters, UI ↔ server sequence
+12. 🎨 [Customizing and extending the SBA UI](#ui-customization) — properties, theme/brand, hiding views, external views, CSS and JS extensions (custom pages and instance tabs), template replacement
+13. 🧪 [Tests](#tests)
+14. 🛠️ [Gotchas and troubleshooting](#gotchas)
+15. ❓ [Q&A](#qa)
+    - 15.1 [Does Spring Boot Admin poll, or do the clients push?](#qa-sba-poll-or-push)
+    - 15.2 [If we don't use Eureka, do we have to list each client in SBA?](#qa-without-eureka)
+    - 15.3 [So without Eureka it's a push from the client?](#qa-push-without-eureka)
+    - 15.4 [Does Eureka save SBA from calling every instance, by replacing those calls with one call to Eureka?](#qa-eureka-saves-calls)
+    - 15.5 [Can we avoid `spring-boot-admin-starter-client` in every service and rely on Eureka alone?](#qa-eureka-only)
+    - 15.6 [What are the `AuditEventRepository` and `HttpExchangeRepository` beans in `ActuatorConfig` for?](#qa-actuator-repositories)
+    - 15.7 [Can we use Basic auth to log in to the SBA UI but OAuth2 towards the backend services?](#qa-basic-ui-oauth-backend)
+    - 15.8 🔥 [`SecurityConfig` exempts `/instances/**` and `/actuator/**` from CSRF — what does a malicious page do with a logged-in SBA session, and how narrow should the exemption be?](#qa-csrf-exemption-scope)
+    - 15.9 🔥 [Someone clicks Heap Dump on a production `order-service` in SBA — what happens to that instance, its callers and the data?](#qa-heapdump-click-production)
+    - 15.10 🔥 [Why is SBA a weak primary alerting system, even after you add a notifier?](#qa-sba-as-alerting)
+    - 15.11 🔥🔥 [Run admin-server as two instances behind a load balancer — what breaks with this module's in-memory state, and is HA worth it at all?](#qa-sba-high-availability)
+    - 15.12 🔥🔥 [SBA suddenly shows the three Postgres-backed services OFFLINE, while Eureka shows them UP and the gateway serves traffic — debug it](#qa-mass-offline-debug)
 
 Spring Boot Admin (SBA) dashboard for the Eureka demo. Back to the project
 overview: [../README.md](../README.md).
@@ -48,6 +51,8 @@ overview: [../README.md](../README.md).
   the registry nodes `localhost:8761`, `127.0.0.1:8762`, `127.0.0.2:8763`), so it appears in
   its own dashboard as `ADMIN-SERVER`, next to `EUREKA-SERVER`, `USER-SERVICE`,
   `ORDER-SERVICE`, `PRODUCT-SERVICE` and `GATEWAY-SERVICE`.
+- ***Talks TLS to the registry and to order/product.*** Eureka client and SBA's `InstanceWebClient` both trust the
+  dev CA through the `trust` SSL bundle; the UI on `:8084` itself stays plain HTTP ([§5](#https)).
 - Entry point: [AdminServerApplication.java](src/main/java/com/learning/discovery/admin/AdminServerApplication.java),
   annotated with `@EnableAdminServer` + `@SpringBootApplication`.
 
@@ -68,7 +73,7 @@ Dependencies in [pom.xml](pom.xml):
 | `spring-boot-starter-actuator`                                                               | admin-server's own actuator endpoints                                                                           |
 | `spring-boot-starter-security`                                                               | login for the UI and actuator                                                                                   |
 | `spring-boot-starter-quartz`                                                                 | demo job behind the SBA "Quartz" view                                                                           |
-| `spring-boot-starter-test`, `spring-boot-webtestclient`, `spring-boot-starter-security-test` | integration test ([§10](#tests))                                                                                 |
+| `spring-boot-starter-test`, `spring-boot-webtestclient`, `spring-boot-starter-security-test` | integration test ([§13](#tests))                                                                                 |
 
 - ***No Jolokia***: the pom comments it out on purpose. `jolokia-support-springboot`
   needs a servlet container, and this server is WebFlux only.
@@ -77,6 +82,8 @@ Dependencies in [pom.xml](pom.xml):
 
 ## <span style="color:hsl(66,80%,50%)">2. 🚀 Run and log in</span>
 
+- ***Generate the TLS stores once*** (`./certs/generate-certs.sh`, root [§9](../README.md#https)) — the registry
+  and order/product serve HTTPS only.
 - ***Start `eureka-server` first.*** admin-server starts without it, but shows no
   applications until it can fetch the registry.
 - From the repo root:
@@ -85,7 +92,7 @@ Dependencies in [pom.xml](pom.xml):
 cd learning-spring-cloud
 mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer1 &
 mvn -pl eureka-server spring-boot:run -Dspring-boot.run.profiles=peer2 &   # once peer1 is up; peer3 optional
-# wait for http://localhost:8761, then:
+# wait for https://localhost:8761, then:
 mvn -pl admin-server spring-boot:run
 ```
 
@@ -250,9 +257,37 @@ How *SBA* authenticates to each service:
   That gives one identity system, short-lived tokens, and no static passwords in
   Eureka metadata.
 
+<a id="https"></a>
+
+## <span style="color:hsl(45,80%,55%)">5. 🔒 HTTPS to the registry and the services</span>
+
+admin-server itself still listens on plain HTTP (`:8084`), but both of its outbound paths now use TLS where the
+target serves it. Whole-stack guide: root [§9](../README.md#https).
+
+| Outbound call                                   | Client                                   | TLS config                                                                 |
+|-------------------------------------------------|------------------------------------------|----------------------------------------------------------------------------|
+| Eureka client → registry (`https://…:8761-8763`) | `CloudEurekaClient`, RestClient transport | bundle `trust` via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/admin/config/EurekaClientTlsConfig.java) |
+| SBA → each instance's actuator                   | `InstanceWebClient` (Reactor Netty)       | `spring.http.clients.ssl.bundle: trust` in [`application.yml`](src/main/resources/application.yml) |
+
+- ***Why one property is enough for SBA*** — `AdminServerInstanceWebClientConfiguration` builds
+  `InstanceWebClient.builder(webClient)` from the `WebClient.Builder` bean Boot auto-configures; Boot applies
+  `spring.http.clients.*` (timeouts, redirects, ***SSL bundle***) to that builder's `ClientHttpConnector`. Status
+  polling, endpoint detection, info polling and every proxied view (`/instances/{id}/actuator/**`) go through it.
+  HTTP targets (user-service, gateway, admin-server itself) are unaffected: the bundle only matters on a TLS handshake.
+- ***Where the `https://` comes from*** — SBA never sees the target's `server.ssl`. `EurekaServiceInstanceConverter`
+  takes the health URL from `InstanceInfo.secureHealthCheckUrl` (set when the target registers with
+  `secure-port-enabled: true`) and the service/management URL from `EurekaServiceInstance.getUri()`, which is
+  `https://host:securePort` for secure instances. So order, product and the registry nodes show `https://` health
+  URLs in the instance list; user-service and gateway keep `http://`.
+- ***Trust failures look like `OFFLINE`*** — a handshake error is an exception in `StatusUpdater`, which maps
+  exceptions to `OFFLINE` (not `DOWN`). Check the admin-server log for `PKIX path building failed` or
+  `No subject alternative names`.
+- ***The bundle trusts only the dev CA*** — a target with a public certificate would fail; add its CA to
+  `truststore.p12` (or use a PEM bundle with several certificates).
+
 <a id="actuator-endpoints"></a>
 
-## <span style="color:hsl(201,80%,58%)">5. 📡 Actuator endpoints exposed</span>
+## <span style="color:hsl(201,80%,58%)">6. 📡 Actuator endpoints exposed</span>
 
 admin-server's own actuator endpoints. SBA shows them for the `ADMIN-SERVER`
 instance, just as it does for the other services. All of them except
@@ -268,7 +303,7 @@ instance, just as it does for the other services. All of them except
 | `restart` (POST)         | "Restart" button                          | Spring Cloud Context; `access: unrestricted`                                                                                                                                |
 | `shutdown` (POST)        | "Shutdown" button                         | `access: unrestricted`                                                                                                                                                      |
 | `loggers`                | Loggers (change levels at runtime)        | Boot auto-config                                                                                                                                                            |
-| `logfile`                | Logfile                                   | `logging.file.name` ([§7](#logging))                                                                                                                                        |
+| `logfile`                | Logfile                                   | `logging.file.name` ([§8](#logging))                                                                                                                                        |
 | `heapdump`               | Heap Dump (download)                      | `access: unrestricted`; still behind login                                                                                                                                  |
 | `threaddump`             | Thread Dump                               | Boot auto-config                                                                                                                                                            |
 | `configprops`            | Configuration Properties                  | Boot auto-config                                                                                                                                                            |
@@ -278,7 +313,7 @@ instance, just as it does for the other services. All of them except
 | `startup`                | Startup                                   | `BufferingApplicationStartup(2048)` set in [AdminServerApplication.java](src/main/java/com/learning/discovery/admin/AdminServerApplication.java) `main`                     |
 | `auditevents`            | Audit Log                                 | `InMemoryAuditEventRepository` bean + the login auditing in [§3.4](#security)                                                                                               |
 | `sbom`                   | SBOM                                      | `META-INF/sbom/application.cdx.json` written by the `cyclonedx-maven-plugin` declared in the [root pom](../pom.xml)                                                         |
-| `quartz`                 | Quartz                                    | `HeartbeatJob` ([§6](#quartz))                                                                                                                                              |
+| `quartz`                 | Quartz                                    | `HeartbeatJob` ([§7](#quartz))                                                                                                                                              |
 
 - ***`startup` exists only when started through `main`.*** `@SpringBootTest`
   doesn't call `main`, so the test context has no `BufferingApplicationStartup`
@@ -307,7 +342,7 @@ instance, just as it does for the other services. All of them except
 
 <a id="quartz"></a>
 
-## <span style="color:hsl(13,80%,58%)">6. ⏱️ Quartz demo job</span>
+## <span style="color:hsl(13,80%,58%)">7. ⏱️ Quartz demo job</span>
 
 - [QuartzConfig.java](src/main/java/com/learning/discovery/admin/job/QuartzConfig.java)
   declares a durable `JobDetail` `demo.heartbeatJob` and a `SimpleTrigger`
@@ -332,20 +367,20 @@ Trigger heartbeatTrigger(JobDetail heartbeatJobDetail) {
 
 <a id="logging"></a>
 
-## <span style="color:hsl(229,80%,58%)">7. 📝 Logging to file</span>
+## <span style="color:hsl(229,80%,58%)">8. 📝 Logging to file</span>
 
 - `logging.file.name: logs/${spring.application.name}.log` → `logs/admin-server.log`,
   relative to the working directory. Running from the module directory puts it
   at `admin-server/logs/`; running from the repo root puts it at `logs/`.
 - ***Setting a log file is what turns on `/actuator/logfile`***, and with it the
   SBA "Logfile" view. Without a file the endpoint returns 404.
-- The heartbeat line ([§6](#quartz)) appears there once a minute, which is a
+- The heartbeat line ([§7](#quartz)) appears there once a minute, which is a
   quick way to check the Logfile view works.
 - [banner.txt](src/main/resources/banner.txt) prints an "ADMIN SVC" ASCII banner at startup.
 
 <a id="configuration"></a>
 
-## <span style="color:hsl(271,80%,58%)">8. ⚙️ Configuration reference</span>
+## <span style="color:hsl(271,80%,58%)">9. ⚙️ Configuration reference</span>
 
 [application.yml](src/main/resources/application.yml), annotated:
 
@@ -373,9 +408,11 @@ server:
   port: 8084
 
 eureka:
+  server:
+    instances: [ localhost:8761, 127.0.0.1:8762, 127.0.0.2:8763 ]   # registry nodes, same list in every module
   client:
     service-url: # the registry itself is Basic-protected
-      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
+      defaultZone: http://${…}@${eureka.server.instances[0]}/eureka/,http://${…}@${eureka.server.instances[1]}/eureka/,http://${…}@${eureka.server.instances[2]}/eureka/
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # (default 90)
@@ -413,7 +450,7 @@ management:
 
 <a id="polling"></a>
 
-## <span style="color:hsl(186,80%,50%)">9. 🔄 Polling frequency</span>
+## <span style="color:hsl(186,80%,50%)">10. 🔄 Polling frequency</span>
 
 - ***Yes, it's configurable, but three separate loops refresh what you see***, each with its own setting. Property
   names and defaults come from the SBA 4.1.3 jar metadata (as of 2026). This module overrides none of them; see
@@ -426,7 +463,7 @@ browser ◄──── status changes pushed over SSE (no timer) ────�
                                                                    admin-server ◄──(3) Eureka registry fetch, 30 s── eureka-server
 ```
 
-### <span style="color:hsl(339,80%,58%)">9.1 Browser → admin-server: detail views</span>
+### <span style="color:hsl(339,80%,58%)">10.1 Browser → admin-server: detail views</span>
 
 | Property (milliseconds)                      | Default | View          |
 |----------------------------------------------|---------|---------------|
@@ -444,7 +481,7 @@ browser ◄──── status changes pushed over SSE (no timer) ────�
 - ***The application list and status badges have no timer.*** admin-server pushes status changes to the browser over
   server-sent events, so what they show is only as fresh as loop 2.
 
-### <span style="color:hsl(116,80%,58%)">9.2 admin-server → each instance: status and info</span>
+### <span style="color:hsl(116,80%,58%)">10.2 admin-server → each instance: status and info</span>
 
 | Property                                       | Default | Meaning                                                                      |
 |------------------------------------------------|---------|------------------------------------------------------------------------------|
@@ -461,14 +498,14 @@ browser ◄──── status changes pushed over SSE (no timer) ────�
   interval ([Q4](#qa-eureka-saves-calls)).
 - ***Lifetime longer than interval makes the lifetime the real interval***, because polls inside it are skipped.
 
-### <span style="color:hsl(254,80%,58%)">9.3 Discovery: new and removed instances</span>
+### <span style="color:hsl(254,80%,58%)">10.3 Discovery: new and removed instances</span>
 
 - ***Not an SBA property.*** admin-server re-reads its instance list each time its Eureka client fetches the registry
   ([Q1](#qa-sba-poll-or-push)), so the setting is `eureka.client.registry-fetch-interval-seconds` (default 30) in this
   module's `application.yml`.
 - A new instance can take longer than 30 s to show, because eureka-server's own response cache adds to the fetch delay.
 
-### <span style="color:hsl(31,80%,58%)">9.4 Tuning it</span>
+### <span style="color:hsl(31,80%,58%)">10.4 Tuning it</span>
 
 ```yaml
 spring:
@@ -496,9 +533,523 @@ spring:
 - ***Worst-case detection with the defaults ≈ interval + timeout = 20 s***: the instance hangs right after a check,
   the next check starts 10 s later, and it gives up after another 10 s.
 
+<a id="sba-internals"></a>
+
+## <span style="color:hsl(270,70%,62%)">11. 🔬 Internals: Spring Boot Admin 4.1 server and UI</span>
+
+Read from the `spring-boot-admin-server` and `spring-boot-admin-server-cloud` 4.1.3 sources. Three ideas carry the
+whole design: ***discovery turns registry entries into `Registration`s***, the ***instance is an event-sourced
+aggregate***, and ***everything else reacts to the event stream***.
+
+### 11.1 Module map
+
+| Module / package                          | Key types                                                                                                   | Job                                                                         |
+|-------------------------------------------|-------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|
+| `server-cloud` `…cloud.discovery`         | `InstanceDiscoveryListener`, `EurekaServiceInstanceConverter`, `DefaultServiceInstanceConverter`            | Spring Cloud `DiscoveryClient` → SBA registrations                          |
+| `server` `…services`                      | `InstanceRegistry`, `HashingInstanceUrlIdGenerator`, `StatusUpdater`(`Trigger`), `EndpointDetector`(`Trigger`), `InfoUpdater`(`Trigger`), `IntervalCheck` | register/deregister, the three polling loops |
+| `server` `…domain.entities` / `.events` / `.values` | `Instance`, `EventsourcingInstanceRepository`, `SnapshottingInstanceRepository`; `InstanceRegisteredEvent`, `InstanceStatusChangedEvent`, `InstanceEndpointsDetectedEvent`, `InstanceInfoChangedEvent`, `InstanceRegistrationUpdatedEvent`, `InstanceDeregisteredEvent`; `Registration`, `StatusInfo`, `Endpoints`, `Info`, `Tags` | the domain model |
+| `server` `…eventstore`                    | `InstanceEventStore`, `InMemoryEventStore` (`ConcurrentMapEventStore`), `HazelcastEventStore`, `InstanceEventPublisher` | append-only event log + Reactor fan-out                       |
+| `server` `…web.client`                    | `InstanceWebClient`, `InstanceExchangeFilterFunctions`, `BasicAuthHttpHeaderProvider`, `LegacyEndpointConverters` | the HTTP client to instances, with its filter chain                 |
+| `server` `…web`                           | `ApplicationsController`, `InstancesController`, `InstancesProxyController`, `InstanceWebProxy`, `SsrfUrlValidator` | REST + SSE API for the UI, actuator proxy                          |
+| `server` `…notify`                        | `Notifier` implementations (mail, Slack, Teams, …), `FilteringNotifier`                                     | react to status changes (none configured here)                              |
+| `server-ui`                               | `UiController`, `AdminServerUiAutoConfiguration`, Vue 3 SPA under `META-INF/spring-boot-admin-server-ui`     | serves the single-page UI and its settings                                  |
+
+### 11.2 Design
+
+```mermaid
+classDiagram
+    direction LR
+    class InstanceDiscoveryListener {
+        -HeartbeatMonitor monitor
+        onApplicationReady / onInstanceRegistered / onHeartbeat(HeartbeatEvent)
+        #discover()
+        #removeStaleInstances(ids)
+    }
+    class EurekaServiceInstanceConverter {
+        convert(ServiceInstance) Registration
+        getHealthUrl() secureHealthCheckUrl ?: healthCheckUrl
+    }
+    class InstanceRegistry {
+        register(Registration) Mono~InstanceId~
+        deregister(InstanceId)
+    }
+    class Instance {
+        <<aggregate, immutable>>
+        InstanceId id
+        long version
+        Registration registration
+        StatusInfo statusInfo
+        Endpoints endpoints
+        Info info
+        List~InstanceEvent~ unsavedEvents
+        register() / withStatusInfo() / withEndpoints() / withInfo() / deregister()
+    }
+    class SnapshottingInstanceRepository {
+        -ConcurrentMap~InstanceId, Instance~ snapshots
+        compute(id, fn) with optimistic-lock retry
+    }
+    class InMemoryEventStore {
+        append(List~InstanceEvent~) — version check
+        find(id) Flux~InstanceEvent~
+    }
+    class InstanceEventPublisher {
+        Sinks.many().unicast() → publish().autoConnect(0)
+    }
+    class StatusUpdateTrigger
+    class EndpointDetectionTrigger
+    class InfoUpdateTrigger
+    class InstanceWebClient {
+        filters: headers, rewrite URL, accept, legacy, logfile, cookies, retry, timeout
+    }
+    InstanceDiscoveryListener --> EurekaServiceInstanceConverter
+    InstanceDiscoveryListener --> InstanceRegistry
+    InstanceRegistry --> SnapshottingInstanceRepository
+    SnapshottingInstanceRepository --> InMemoryEventStore
+    InMemoryEventStore --|> InstanceEventPublisher
+    SnapshottingInstanceRepository ..> Instance
+    InstanceEventPublisher ..> StatusUpdateTrigger : events
+    InstanceEventPublisher ..> EndpointDetectionTrigger : events
+    InstanceEventPublisher ..> InfoUpdateTrigger : events
+    StatusUpdateTrigger --> InstanceWebClient : GET health
+    EndpointDetectionTrigger --> InstanceWebClient : GET /actuator, OPTIONS
+    InfoUpdateTrigger --> InstanceWebClient : GET info
+```
+
+- ***Instance id*** — `HashingInstanceUrlIdGenerator`: the first 12 hex characters of `SHA-1(healthUrl)`. The id is
+  stable across SBA restarts as long as the health URL is; when an instance switches from `http://` to `https://`
+  (as order/product did) it gets a ***new id***, and the old one is deregistered as stale.
+- ***Event sourcing*** — `Instance` never mutates: each `withX(...)` returns a copy with one more entry in
+  `unsavedEvents` (only if something actually changed). `repository.save` appends those events with the aggregate's
+  `version`; a concurrent writer causes `OptimisticLockingException`, and `compute` retries on the fresh state. The
+  in-memory store keeps at most `maxLogSizePerAggregate` (100) events per instance — that is the history the UI's
+  *Journal* shows, and why it's empty after an SBA restart.
+- ***One hot stream*** — `InstanceEventPublisher` emits every appended event into a unicast sink shared through
+  `publish().autoConnect(0)`; each trigger, the snapshot cache, notifiers and every UI SSE connection subscribe to it.
+
+### 11.3 Discovery → registration → first status — sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant EC as CloudEurekaClient
+    participant IDL as InstanceDiscoveryListener
+    participant CONV as EurekaServiceInstanceConverter
+    participant REG as InstanceRegistry
+    participant REPO as SnapshottingInstanceRepository<br/>+ InMemoryEventStore
+    participant PUB as InstanceEventPublisher
+    participant SUT as StatusUpdateTrigger
+    participant EDT as EndpointDetectionTrigger
+    participant IUT as InfoUpdateTrigger
+    participant WC as InstanceWebClient (TLS bundle)
+    participant OS as order-service
+
+    EC->>IDL: HeartbeatEvent(count) after each registry fetch (30 s)
+    IDL->>IDL: HeartbeatMonitor.update(value) changed?
+    IDL->>EC: getServices() / getInstances(id) (in memory)
+    IDL->>CONV: convert(ServiceInstance)
+    CONV-->>IDL: Registration(name, healthUrl=https://127.0.0.1:8082/actuator/health,<br/>managementUrl, serviceUrl, metadata, source="discovery")
+    IDL->>REG: register(registration)
+    REG->>REPO: compute(id = sha1(healthUrl)[0..12], instance.register(...))
+    REPO->>PUB: append → InstanceRegisteredEvent
+    IDL->>REG: deregister(ids not seen this round) → InstanceDeregisteredEvent
+
+    PUB-->>SUT: InstanceRegisteredEvent
+    SUT->>WC: GET {healthUrl}
+    WC->>OS: HTTPS + Basic (metadata user.name/password)
+    OS-->>WC: 200 {"status":"UP", ...}
+    SUT->>REPO: withStatusInfo(UP) → InstanceStatusChangedEvent(UNKNOWN→UP)
+    REPO->>PUB: append
+    PUB-->>EDT: InstanceStatusChangedEvent
+    EDT->>WC: GET {managementUrl} (actuator index _links) — fallback: OPTIONS per endpoint
+    EDT->>REPO: withEndpoints(...) → InstanceEndpointsDetectedEvent
+    PUB-->>IUT: InstanceEndpointsDetectedEvent
+    IUT->>WC: GET info
+    IUT->>REPO: withInfo(...) → InstanceInfoChangedEvent
+    Note over SUT,IUT: afterwards IntervalCheck re-polls: status every 10 s,<br/>info every 1 min, each with backoff on errors
+```
+
+### 11.4 The three polling loops
+
+| Loop                      | Starts on                                                                 | Interval (`spring.boot.admin.monitor.*`)                      | Result → event                                                               |
+|---------------------------|---------------------------------------------------------------------------|---------------------------------------------------------------|------------------------------------------------------------------------------|
+| `StatusUpdateTrigger`     | `InstanceRegisteredEvent`, `InstanceRegistrationUpdatedEvent` + interval  | `status-interval` 10 s, `status-lifetime` 10 s, `status-max-backoff` 60 s | body `status` → `UP`/`DOWN`/…; non-2xx without a body → `DOWN`; exception/timeout → `OFFLINE` → `InstanceStatusChangedEvent` |
+| `EndpointDetectionTrigger`| `InstanceStatusChangedEvent`, `InstanceRegistrationUpdatedEvent`           | event-driven only                                             | `QueryIndexEndpointStrategy` (actuator index) then `ProbeEndpointsStrategy` (OPTIONS) → `InstanceEndpointsDetectedEvent` |
+| `InfoUpdateTrigger`       | `InstanceEndpointsDetectedEvent`, `InstanceStatusChangedEvent`, `InstanceRegistrationUpdatedEvent` + interval | `info-interval` 1 min, `info-lifetime` 1 min, `info-max-backoff` 10 min | `/actuator/info` → `InstanceInfoChangedEvent`                                |
+
+`IntervalCheck` drives the periodic part: every interval it checks each instance whose last check is older than the
+lifetime, and doubles the per-instance delay after failures up to the max backoff. The rates and tuning knobs are in
+[§10](#polling).
+
+### 11.5 `InstanceWebClient` filter chain
+
+Every request to an instance — polling and proxied UI calls — runs through these `InstanceExchangeFilterFunction`s,
+in `@Order`:
+
+| Order | Filter                         | Does                                                                                      |
+|-------|--------------------------------|-------------------------------------------------------------------------------------------|
+| 0     | `addHeaders`                   | `HttpHeadersProvider`s, here `BasicAuthHttpHeaderProvider`: Basic from metadata `user.name`/`user.password`, else `instance-auth.default-*` ([§3.5](#security)) |
+| 10    | `rewriteEndpointUrl`           | turns a relative endpoint id (`health`, `info`, `metrics`) into the instance's absolute URL from its `Endpoints` |
+| 20    | `setDefaultAcceptHeader`       | actuator v3/v2 media types + JSON                                                         |
+| 30    | `convertLegacyEndpoints`       | Boot 1.x responses → current format                                                       |
+| 40    | `logfileAcceptWorkaround`      | `Accept: */*` for `logfile`                                                               |
+| 50    | `handleCookies`                | per-instance cookie store (session-based actuators)                                       |
+| 100   | `retry`                        | `spring.boot.admin.monitor.default-retries` (0) / per endpoint                            |
+| 200   | `timeout`                      | `spring.boot.admin.monitor.default-timeout` (10 s) / per endpoint                         |
+
+The connector underneath is Boot's (`spring.http.clients.*`), which is where the TLS bundle plugs in ([§5](#https)).
+
+### 11.6 UI ↔ server — sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser (Vue 3 SPA)
+    participant UI as UiController
+    participant API as ApplicationsController /<br/>InstancesController
+    participant PX as InstancesProxyController<br/>→ InstanceWebProxy
+    participant WC as InstanceWebClient
+    participant OS as order-service
+
+    B->>UI: GET / (session cookie after /login)
+    UI-->>B: index.html + UI settings (title, brand, views, routes, poll timers)
+    B->>API: GET /applications (Accept: text/event-stream)
+    API-->>B: SSE: every application, then one event per change (grouped by name)
+    B->>API: GET /instances/events (SSE) — Journal
+    B->>PX: GET /instances/{id}/actuator/metrics/jvm.memory.used
+    PX->>PX: resolve instance · SsrfUrlValidator · HttpHeaderFilter (drop hop-by-hop + configured ignored headers)
+    PX->>WC: forward(method, uri, headers, body)
+    WC->>OS: HTTPS + Basic (filter chain above)
+    OS-->>WC: 200 JSON
+    WC-->>PX: response
+    PX-->>B: 200 JSON (error → 502, unknown instance → 503, timeout → 504)
+    B->>PX: POST /instances/{id}/actuator/loggers/com.learning {"configuredLevel":"DEBUG"}
+    Note over B,PX: writes go the same way, /applications/{name}/actuator/** fans out to every instance
+```
+
+- ***The UI only talks to admin-server*** — never to an instance; that is why only admin-server needs network access
+  to (and trust in) the services, and why its Basic credentials/metadata are the security boundary ([§3](#security)).
+- ***Live updates are SSE***, not polling from the browser: the server's polling loops (11.4) produce events, and
+  the SSE endpoints stream them. A proxy that buffers responses (or a too-short idle timeout) freezes the dashboard.
+
+<a id="ui-customization"></a>
+
+## <span style="color:hsl(320,70%,60%)">12. 🎨 Customizing and extending the SBA UI</span>
+
+The SBA 4.1 UI is a Vue 3 single-page app inside `spring-boot-admin-server-ui`. You don't fork it — there are four
+levels, from no code to full replacement, all checked against the 4.1.3 jar (`AdminServerUiProperties`,
+`UiController`, `UiExtensionsScanner`, `UiRoutesScanner`, the bundled `index.html` / `sba-settings.js` /
+`variables.css`, and the SPA bundle's `SBA` global).
+
+| Level | What                                              | Effort        | Survives upgrades |
+|-------|---------------------------------------------------|---------------|-------------------|
+| 1     | `spring.boot.admin.ui.*` properties: title, brand, theme, hidden views, external links, polling | YAML          | ✅                 |
+| 2     | CSS extension: override colours/CSS variables     | one `.css`    | mostly (CSS classes can change) |
+| 3     | JS extension: new top-level pages, new instance tabs, redirects | JS / Vue      | ✅ (public `SBA.use` API) |
+| 4     | Replace templates or static assets                | copy + edit   | ❌ (tied to one UI build) |
+
+### 12.1 How the page is assembled
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant UC as UiController (Thymeleaf)
+    participant RH as Resource handlers
+    participant SPA as SPA bundle (assets/sba-*.js)
+    participant EXT as Your extension<br/>(extensions/custom/index.js)
+
+    Note over UC: at startup: UiExtensionsScanner finds **/*.js and **/*.css under<br/>extension-resource-locations · UiRoutesScanner reads **/routes.txt
+    B->>UC: GET / (logged in)
+    UC-->>B: index.html with model: uiSettings, palette, cssExtensions, jsExtensions, user, baseUrl
+    B->>UC: GET sba-settings.js → window.SBA = {uiSettings, user, extensions, csrf}
+    B->>UC: GET variables.css → --main-50…900 from theme.palette
+    B->>RH: GET extensions/custom/custom.css (link tag per CSS extension)
+    B->>RH: GET assets/sba-*.js
+    SPA->>SPA: globalThis.Vue = Vue · SBA.viewRegistry · SBA.use = ({install}) => install({viewRegistry, applicationStore, i18n})
+    B->>RH: GET extensions/custom/index.js (preloaded per JS extension)
+    EXT->>SPA: SBA.use({ install({viewRegistry}) { viewRegistry.addView({...}) } })
+    SPA->>SPA: router gets the new route · nav/instance sidebar shows it if isEnabled()
+```
+
+- ***Static files*** — `/**` is served from `spring.boot.admin.ui.resource-locations`
+  (default `classpath:/META-INF/spring-boot-admin-server-ui/`), `/extensions/**` from
+  `extension-resource-locations` (default `classpath:/META-INF/spring-boot-admin-server-ui/extensions/`, scanned as
+  `classpath*:`, so extensions can come from any jar on the classpath).
+- ***Deep links*** — the `HomepageForwardingFilter` forwards UI routes (`/about/**`, `/applications/**`,
+  `/instances/**`, `/journal/**`, `/wallboard/**`, `/external/**`, plus every line of every `routes.txt`) to
+  `index.html`, so a browser refresh on a client-side route doesn't 404.
+
+### 12.2 Level 1 — properties (`spring.boot.admin.ui.*`)
+
+| Property                              | Default                                    | Effect                                                                 |
+|---------------------------------------|--------------------------------------------|------------------------------------------------------------------------|
+| `title`                               | `Spring Boot Admin`                        | `<title>` of UI and login page                                         |
+| `brand`                               | SBA logo + text (HTML)                     | top-left of the nav bar; raw HTML                                      |
+| `login-icon`                          | `assets/img/icon-spring-boot-admin.svg`    | image on the login page                                                |
+| `favicon` / `favicon-danger`          | `assets/img/favicon.png` / `…-danger.png`  | the danger icon is shown while any instance is down                    |
+| `theme.color`                         | `#14615A`                                  | `<meta name="theme-color">`                                            |
+| `theme.palette.shade50` … `shade900`  | teal scale                                 | `--main-50` … `--main-900` in `variables.css` (all accents)            |
+| `theme.background-enabled`            | `true`                                     | the gradient background                                                |
+| `view-settings[n].name` / `.enabled`  | all on                                     | hide a built-in view (12.4)                                            |
+| `external-views[n].label/url/order/iframe/children` | none                         | extra nav entries: link, iframe, or dropdown                           |
+| `poll-timer.{cache,datasource,gc,process,memory,threads}` | `2500` ms                | refresh rate of the live charts on the Details/Metrics views           |
+| `poll-timer.{threaddump,logfile}`     | `1000` ms                                  | refresh of thread dump / log tail                                      |
+| `available-languages`                 | all bundled                                | language picker, e.g. `[en, de]`                                       |
+| `enable-toasts`                       | `false`                                    | in-page toast on status changes                                        |
+| `browser-notification-timeout`        | `5s`                                       | desktop notification duration                                          |
+| `hide-instance-url` / `disable-instance-url` | `false`                             | hide / don't link the instance URL in lists                            |
+| `remember-me-enabled`                 | `true` (`false` here)                      | "remember me" checkbox on the login page                               |
+| `public-url`                          | context path                               | external base URL when SBA sits behind a proxy (`<base href>`)         |
+| `cache.max-age` / `no-cache` / `no-store` | `3600s` / `false` / `false`            | `Cache-Control` on UI resources (extensions included)                  |
+| `cache-templates`                     | `true`                                     | Thymeleaf template cache (turn off while editing templates)            |
+| `additional-route-excludes`           | none                                       | paths the homepage forwarder must not swallow                          |
+| `resource-locations` / `extension-resource-locations` / `template-location` | the jar | where static files, extensions and templates come from     |
+
+Example for this module (not applied — copy into [application.yml](src/main/resources/application.yml) under
+`spring.boot.admin.ui`):
+
+```yaml
+spring:
+  boot:
+    admin:
+      ui:
+        title: Learning Spring Cloud — Admin
+        brand: '<img src="assets/img/icon-spring-boot-admin.svg"><span>Learning Admin</span>'
+        theme:
+          color: "#4F46E5"
+          palette:            # indigo instead of teal; any 10-step scale works
+            shade50: "#EEF2FF"
+            shade100: "#E0E7FF"
+            shade200: "#C7D2FE"
+            shade300: "#A5B4FC"
+            shade400: "#818CF8"
+            shade500: "#6366F1"
+            shade600: "#4F46E5"
+            shade700: "#4338CA"
+            shade800: "#3730A3"
+            shade900: "#312E81"
+        view-settings:
+          - name: instances/heapdump     # hide the view (see the warning in 15.4)
+            enabled: false
+          - name: instances/jolokia
+            enabled: false
+        external-views:
+          - label: Eureka
+            url: https://localhost:8761
+            order: 2000
+          - label: Tracing
+            children:
+              - label: Zipkin
+                url: http://localhost:9411/zipkin/
+              - label: Grafana
+                url: http://localhost:3000
+                iframe: true
+        enable-toasts: true
+        available-languages: [en, de]
+        poll-timer:
+          memory: 5000
+          threads: 5000
+```
+
+### 12.3 Theme, brand and your own images
+
+- ***Colours*** — the palette ends up as `--main-50` … `--main-900` in `variables.css` (values rendered as
+  `rgb(r, g, b)`); every accent in the SPA uses those variables, so `theme.palette` restyles the whole UI.
+- ***Your own logo/favicon*** — put files on a resource location and reference them relatively. Either add a location
+  (the jar's must stay first, or you shadow the UI itself):
+
+  ```yaml
+  spring.boot.admin.ui:
+    resource-locations: classpath:/META-INF/spring-boot-admin-server-ui/,classpath:/sba-branding/
+    brand: '<img src="logo.svg"><span>Learning Admin</span>'
+    favicon: favicon.png
+    login-icon: logo.svg
+  ```
+
+  …or ship them under `src/main/resources/META-INF/spring-boot-admin-server-ui/assets/img/`, which the default
+  location already serves.
+- ***Security*** — the login page is rendered ***before*** authentication: [SecurityConfig](src/main/java/com/learning/discovery/admin/config/SecurityConfig.java)
+  permits only `/assets/**`, `/variables.css` and `/login` (plus the public paths). A `login-icon` or `favicon`
+  outside `assets/` shows as a broken image on the login page; keep login-page images under `assets/` or permit
+  their path. Extensions (`/extensions/**`) load only after login, so they can stay authenticated.
+
+### 12.4 Hiding built-in views
+
+`view-settings` takes the view ***name***. The ones in 4.1.3:
+
+| Area      | Names                                                                                                                                                                                                                                                                                     |
+|-----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Top level | `applications`, `wallboard`, `journal`, `about`                                                                                                                                                                                                                                           |
+| Instance  | `instances/details`, `metrics`, `env`, `beans`, `configprops`, `conditions`, `scheduledtasks`, `caches`, `flyway`, `liquibase`, `startup`, `loggers`, `logfile`, `jolokia`, `threaddump`, `heapdump`, `httpexchanges`, `httptrace`, `auditevents`, `sessions`, `mappings`, `gateway`, `quartz`, `sbom`, `dependencies` (all prefixed `instances/`) |
+
+- ***It only hides the UI*** — the default `isEnabled` of every view checks `uiSettings.viewSettings`; the
+  endpoint itself is still exposed by the service and still reachable through SBA's proxy
+  (`/instances/{id}/actuator/heapdump`) by anyone logged in. To really block it, drop it from
+  `management.endpoints.web.exposure.include` in the service, or deny the path in this module's `SecurityConfig`
+  (see [Q&A 15.9](#qa-heapdump-click-production)).
+- ***Built-in views also hide themselves*** when the instance lacks the endpoint
+  (`isEnabled: ({instance}) => instance.hasEndpoint('heapdump')`) — that's why `gateway` appears only for
+  `GATEWAY-SERVICE` and `sessions` only for `ORDER-SERVICE`.
+
+### 12.5 External views and per-instance flags
+
+- ***External views*** — `url` + `label` makes a nav link (opens a new tab); `iframe: true` embeds it under
+  `/external/...`, which only works if the target allows framing. Spring Security sends `X-Frame-Options: DENY` by
+  default, so the Eureka dashboard and the other modules' pages need `iframe: false`; `children` turns an entry into
+  a dropdown; `order` sorts them among the built-in entries.
+- ***Per-instance metadata*** (set in the service's `eureka.instance.metadata-map`, read by the UI):
+  - `tags.*` — badges in the application list (already used: `tags.environment`, `tags.tier`).
+  - `hide-url: "true"` / `disable-url: "true"` — hide or un-link that instance's URL (per-instance version of
+    `hide-instance-url` / `disable-instance-url`).
+
+### 12.6 Level 2 — CSS extension
+
+Any `.css` under the extension location is linked into `index.html` after the UI's own styles:
+
+```css
+/* src/main/resources/META-INF/spring-boot-admin-server-ui/extensions/custom/custom.css */
+:root {
+  --main-500: rgb(99, 102, 241);   /* same variables variables.css defines; wins by load order */
+}
+.navbar { box-shadow: none; }      /* SPA classes are not an API: re-check after upgrades */
+```
+
+Prefer `theme.palette` for colours; use CSS for what properties can't express. The login page doesn't load
+extension CSS.
+
+### 12.7 Level 3 — JS extension: your own views and instance tabs
+
+***Layout*** (in this module, no extra dependency):
+
+```text
+src/main/resources/META-INF/spring-boot-admin-server-ui/extensions/custom/
+├── index.js        # loaded on every UI page; calls SBA.use(...)
+├── custom.css      # optional
+└── routes.txt      # one client-side route per line, e.g. /custom  (deep-link refresh)
+```
+
+At startup the log shows `Loaded Spring Boot Admin UI Extension: UiExtension(resourcePath=custom/index.js, …)`.
+
+***The API*** — the SPA exposes `globalThis.Vue` and `globalThis.SBA`; an extension calls
+`SBA.use({ install({ viewRegistry, applicationStore, i18n }) { … } })`:
+
+| Argument           | What you get                                                                                         |
+|--------------------|------------------------------------------------------------------------------------------------------|
+| `viewRegistry`     | `addView(view)`, `addRedirect(path, viewName)`, `setGroupIcon(group, svg)`, `views`                  |
+| `applicationStore` | `useApplicationStore` — call it to get the store behind the application list (applications, instances, live SSE updates) |
+| `i18n`             | the vue-i18n global composer: `i18n.mergeLocaleMessage('en', {...})` for your labels               |
+
+`addView` options:
+
+| Option       | Meaning                                                                                                  |
+|--------------|----------------------------------------------------------------------------------------------------------|
+| `name`       | unique id (defaults to `parent/path`); also the key for `view-settings`                                 |
+| `path`       | route path; top-level views use `/x`, instance tabs a relative segment                                  |
+| `parent`     | `'instances'` → a tab in the instance sidebar (component gets the `instance` prop); omit for top level   |
+| `label` / `handle` | sidebar/nav text (an i18n key or plain text) or a custom component for the nav entry               |
+| `group`      | instance sidebar section: `web`, `insights`, `data`, `jvm`, `logging`, `security`, `dependencies`, `none` (default) |
+| `order`      | position (built-ins use 0–1000)                                                                          |
+| `component`  | a Vue 3 component                                                                                        |
+| `isEnabled`  | `({ instance }) => boolean`; default: enabled unless switched off in `view-settings`                     |
+
+***Example: a top-level page and an instance tab, no build step*** (render functions need no template compiler):
+
+```js
+// extensions/custom/index.js
+/* global SBA, Vue */
+const { h, ref, onMounted } = Vue;
+
+SBA.use({
+  install({ viewRegistry, i18n }) {
+    i18n.mergeLocaleMessage('en', { custom: { label: 'Cache stats' } });
+
+    // 1) top-level page at /custom (listed in routes.txt for refresh)
+    viewRegistry.addView({
+      name: 'custom',
+      path: '/custom',
+      label: 'Team page',
+      order: 1000,
+      component: { setup: () => () => h('div', { class: 'p-4' }, 'Runbooks, on-call, links…') },
+    });
+
+    // 2) instance tab, only for instances that expose the "caches" endpoint (order-service here)
+    viewRegistry.addView({
+      parent: 'instances',
+      path: 'cache-stats',
+      label: 'custom.label',
+      group: 'data',
+      order: 950,
+      isEnabled: ({ instance }) => instance.hasEndpoint('caches'),
+      component: {
+        props: { instance: { type: Object, required: true } },
+        setup(props) {
+          const caches = ref(null);
+          onMounted(async () => {
+            // instance.axios targets instances/{id}/ on admin-server → InstancesProxyController
+            // → InstanceWebClient (Basic auth + TLS) → https://127.0.0.1:8082/actuator/caches
+            const res = await props.instance.axios.get('actuator/caches');
+            caches.value = res.data;
+          });
+          return () => h('pre', { class: 'p-4 text-sm' }, JSON.stringify(caches.value, null, 2));
+        },
+      },
+    });
+  },
+});
+```
+
+- ***Calls go through SBA, never straight to the service*** — `instance.axios` has `baseURL instances/{id}` with
+  credentials, so the browser only talks to admin-server, and the proxy adds the service's Basic auth and TLS
+  ([11.6](#sba-internals)). Mutations (`post`, `delete`) work the same way; CSRF is not needed for
+  `/instances/**` here because [SecurityConfig](src/main/java/com/learning/discovery/admin/config/SecurityConfig.java)
+  exempts it ([Q&A 15.8](#qa-csrf-exemption-scope)).
+- ***Bigger extensions*** — write `.vue` single-file components and build with Vite in library mode, with `vue`
+  marked external and mapped to the global `Vue` (`build.rollupOptions.external: ['vue']`,
+  `output.globals: { vue: 'Vue' }`), output to the `extensions/<name>/` folder (e.g. via `frontend-maven-plugin`).
+  ***Never bundle your own Vue***: two Vue copies can't share components or reactivity.
+- ***Own endpoint, own tab*** — add an actuator endpoint to a service (`@Endpoint(id = "teaminfo")` +
+  `@ReadOperation`, then `teaminfo` in `exposure.include`); SBA's endpoint detection picks it up from the actuator
+  index, and a tab with `isEnabled: ({instance}) => instance.hasEndpoint('teaminfo')` appears only on instances that
+  have it.
+
+### 12.8 Level 4 — replacing templates (last resort)
+
+`index.html`, `login.html`, `sba-settings.js` and `variables.css` are Thymeleaf templates read from
+`template-location`. Pointing it (or `resource-locations`) at your own copies lets you change anything — e.g. a
+login page with a company notice — but the copies are tied to one UI build: the SPA bundle's file names and the
+model attributes change between SBA versions. Prefer levels 1–3.
+
+### 12.9 Checked against this module
+
+With admin-server started with `--spring.boot.admin.ui.extension-resource-locations=file:<dir>/` (folder with
+`custom/index.js`, `custom/custom.css`, `custom/routes.txt`), `title`, one `view-settings` and one `external-views`
+entry:
+
+- the startup log lists both extension files as `Loaded Spring Boot Admin UI Extension`;
+- after form login, `index.html` contains `href="extensions/custom/custom.css"` and `href="extensions/custom/index.js"`
+  and the custom `<title>`;
+- `sba-settings.js` carries the `viewSettings`, `externalViews` and `routes` (the `routes.txt` entry `/custom`
+  appended to the defaults);
+- `GET /extensions/custom/index.js` → `200`, and `GET /custom` (deep link) → `200` (`index.html`).
+
+The browser rendering of the example views was not exercised here; the `SBA.use` / `viewRegistry.addView` / `Vue`
+contract above was read from the 4.1.3 bundle.
+
+### 12.10 Gotchas
+
+- ***Edits don't show up*** — UI resources (extensions too) are served with `Cache-Control: max-age=3600`; set
+  `spring.boot.admin.ui.cache.no-cache: true` while developing, and rebuild/restart (extensions are scanned at
+  startup; a new file needs a restart, an edited one only a refresh).
+- ***A throwing extension*** — extensions run in the UI's page; an error in `index.js` or `install` can break views
+  or the whole load. Check the browser console for your file name first.
+- ***Refresh on your page gives the login page or 404*** — the route is missing from `routes.txt`, so the homepage
+  forwarder doesn't send it to `index.html`.
+- ***Minified internals are not an API*** — use only `SBA.use`, `viewRegistry`, `applicationStore`, `i18n`, the
+  `instance` prop and `instance.axios`/`hasEndpoint`; everything else in the bundle can change in any release.
+
 <a id="tests"></a>
 
-## <span style="color:hsl(311,80%,58%)">10. 🧪 Tests</span>
+## <span style="color:hsl(311,80%,58%)">13. 🧪 Tests</span>
 
 [AdminServerApplicationIT.java](src/test/java/com/learning/discovery/admin/AdminServerApplicationIT.java):
 `@SpringBootTest(webEnvironment = RANDOM_PORT)` + `@AutoConfigureWebTestClient`
@@ -528,7 +1079,7 @@ mvn -pl admin-server verify -Dit.test=AdminServerApplicationIT
 
 <a id="gotchas"></a>
 
-## <span style="color:hsl(46,80%,58%)">11. 🛠️ Gotchas and troubleshooting</span>
+## <span style="color:hsl(46,80%,58%)">14. 🛠️ Gotchas and troubleshooting</span>
 
 | Symptom                                               | Likely cause                                                                      | Fix                                                                                                                                                                                      |
 |-------------------------------------------------------|-----------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -545,7 +1096,7 @@ mvn -pl admin-server verify -Dit.test=AdminServerApplicationIT
 
 <a id="qa"></a>
 
-## <span style="color:hsl(0,80%,58%)">12. ❓ Q&A</span>
+## <span style="color:hsl(0,80%,58%)">15. ❓ Q&A</span>
 
 <a id="qa-sba-poll-or-push"></a>
 
@@ -619,7 +1170,7 @@ spring:
         simple:
           instances:
             order-service:
-              - uri: http://localhost:8082
+              - uri: https://localhost:8082
                 metadata:
                   management.context-path: /actuator
                   user.name: admin
@@ -854,7 +1405,7 @@ logged-in SBA session, and how narrow should the exemption be?**
   working around a missing token.
 - ***Defence in depth*** — add an `Origin`/`Referer` check on unsafe methods, require a separate role for the
   destructive proxied endpoints, and turn `shutdown`/`env` POST off on the services in prod (root
-  [FAQ 7.10](../README.md#faq-shared-credentials-blast-radius)).
+  [FAQ 12.10](../README.md#faq-shared-credentials-blast-radius)).
 
 <a id="qa-heapdump-click-production"></a>
 

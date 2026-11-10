@@ -2,15 +2,32 @@
 #   peer1  :8761  hostname localhost   (also the default: active unless peer2 or peer3 is)
 #   peer2  :8762  hostname 127.0.0.1
 #   peer3  :8763  hostname 127.0.0.2
-# All nodes share one defaultZone listing the three; for replication a node drops the entry whose host equals its own
+# All nodes build one defaultZone from eureka.server.instances; for replication a node drops the entry whose host equals its own
 # eureka.instance.hostname (the port is ignored), so the hostnames must differ. All three are loopback, no /etc/hosts
 # entry: Linux and Windows route all of 127.0.0.0/8 to loopback, macOS needs `sudo ifconfig lo0 alias 127.0.0.2` once.
 server:
   shutdown: graceful   # Boot 3.4+ default, explicit here: finish in-flight requests (max spring.lifecycle.timeout-per-shutdown-phase, 30 s) before stopping
+  ssl:
+    bundle: server   # HTTPS only on this port; plain http:// requests get a 400
 
 spring:
   application:
     name: eureka-server   # same app name on every node: one EUREKA-SERVER app with one instance per node (dashboard replica check needs it)
+  ssl:
+    bundle: # spring.ssl.bundle.jks.<name>: TLS material by name; certs/generate-certs.sh writes src/main/resources/tls/
+      jks:
+        server: # this process's certificate + private key; Tomcat serves HTTPS with it (server.ssl.bundle)
+          key:
+            alias: server
+          keystore:
+            location: classpath:tls/server.p12
+            password: ${TLS_KEYSTORE_PASSWORD:changeit}
+            type: PKCS12
+        trust: # CA trusted when this process calls an https:// URL (own Eureka client and peer replication: EurekaTlsConfig)
+          truststore:
+            location: classpath:tls/truststore.p12
+            password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
+            type: PKCS12
   security:
     user:
       name: ${ACTUATOR_USER:admin}
@@ -33,6 +50,8 @@ eureka:
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # evicted 30 s after the last heartbeat (default 90)
+    secure-port-enabled: true        # registered as https://<hostname>:<port>; SBA polls it over TLS
+    non-secure-port-enabled: false
     metadata-map:
       # SBA discovers this node from the registry and polls /actuator with these credentials
       user.name: ${spring.security.user.name}
@@ -43,8 +62,13 @@ eureka:
     register-with-eureka: true
     fetch-registry: true
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.1:8762/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.2:8763/eureka/
+      # one https:// URL per eureka.server.instances entry (every node serves TLS); Basic credentials go in each URL
+      defaultZone: https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[0]}/eureka/,https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[1]}/eureka/,https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[2]}/eureka/
   server:
+    instances: # every registry node, read by defaultZone above; hostnames must differ (see top)
+      - localhost:8761
+      - 127.0.0.1:8762
+      - 127.0.0.2:8763
     # on everywhere: a network blip can't mass-evict the registry (and the dashboard drops the
     # "SELF PRESERVATION MODE IS TURNED OFF" banner); EUREKA_SELF_PRESERVATION=false to opt out
     enable-self-preservation: ${EUREKA_SELF_PRESERVATION:true}

@@ -5,11 +5,23 @@ server:
 spring:
   application:
     name: admin-server
+  ssl:
+    bundle: # spring.ssl.bundle.jks.<name>: TLS material by name; certs/generate-certs.sh writes src/main/resources/tls/
+      jks:
+        trust: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig; actuator polling: spring.http.clients.ssl.bundle)
+          truststore:
+            location: classpath:tls/truststore.p12
+            password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
+            type: PKCS12
   security:
     user: # actuator Basic auth AND the SBA UI login form
       name: ${ACTUATOR_USER:admin}
       password: ${ACTUATOR_PASSWORD:admin}
       roles: ACTUATOR
+  http:
+    clients:
+      ssl:
+        bundle: trust   # Boot's WebClient.Builder (SBA builds its InstanceWebClient from it): polls https:// actuators
   boot:
     admin:
       ui:
@@ -28,9 +40,15 @@ app:
       - "/error"
 
 eureka:
+  server:
+    instances: # registry nodes, read by defaultZone below; same list in every module
+      - localhost:8761
+      - 127.0.0.1:8762
+      - 127.0.0.2:8763
   client:
     service-url:
-      defaultZone: http://${spring.security.user.name}:${spring.security.user.password}@localhost:8761/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.1:8762/eureka/,http://${spring.security.user.name}:${spring.security.user.password}@127.0.0.2:8763/eureka/
+      # one https:// URL per eureka.server.instances entry (every node serves TLS); Basic credentials go in each URL
+      defaultZone: https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[0]}/eureka/,https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[1]}/eureka/,https://${spring.security.user.name}:${spring.security.user.password}@${eureka.server.instances[2]}/eureka/
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # evicted 30 s after the last heartbeat (default 90)

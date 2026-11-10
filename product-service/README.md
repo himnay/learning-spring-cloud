@@ -25,13 +25,18 @@ every Spring Boot Admin (SBA) view. Shared setup that applies to every module (p
 view matrix) lives in the
 [root README](../README.md); this file covers only what `product-service` itself does.
 
+> 🔒 ***HTTPS only*** on `:8083` (`server.ssl.bundle: server`); registers in Eureka as `https://127.0.0.1:8083`
+> (`secure-port-enabled`, `ip-address`), and calls the registry over TLS through the `trust` bundle
+> ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/product/config/EurekaClientTlsConfig.java)). Run
+> `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt`. Full guide: root [§9](../README.md#https).
+
 <a id="overview"></a>
 
 ## <span style="color:hsl(201,80%,58%)">1. 🧭 Overview</span>
 
 - ***Role*** — Eureka client and REST microservice; registered as `PRODUCT-SERVICE`, reached directly on `:8083` or
   through the gateway route `/api/products/**` → `lb://PRODUCT-SERVICE`
-  (see [root §2](../README.md#how-the-gateway-finds-services-via-eureka)).
+  (see [root §6](../README.md#how-the-gateway-finds-services-via-eureka)).
 - ***Port*** — `8083` (`server.port` in [application.yml](src/main/resources/application.yml)).
 - ***Data source*** — ***Postgres*** (host port 5436, started by `spring-boot-docker-compose` from
   [docker-compose.yaml](docker-compose.yaml)) through Spring Data JDBC: `ProductRepository extends
@@ -77,7 +82,7 @@ Seed data:
 | 205 | Headset  | 79.50  |
 | 206 | Webcam   | 59.90  |
 
-- ***Swagger UI*** — http://localhost:8083/swagger-ui.html (spec at `/v3/api-docs`); both are public, but "Try it out"
+- ***Swagger UI*** — https://localhost:8083/swagger-ui.html (spec at `/v3/api-docs`); both are public, but "Try it out"
   calls to `/api/**` still need credentials.
 - ***Banner*** — [banner.txt](src/main/resources/banner.txt) prints project metadata, Boot/Java versions and the Swagger
   URL at startup.
@@ -106,12 +111,13 @@ ACTUATOR_USER=ops ACTUATOR_PASSWORD=s3cret mvn -pl product-service spring-boot:r
 **Direct calls:**
 
 ```bash
-curl -u admin:admin http://localhost:8083/api/products
-curl -u admin:admin http://localhost:8083/api/products/202
-curl -i -u admin:admin http://localhost:8083/api/products/999   # 404
-curl -i http://localhost:8083/api/products                       # 401 + WWW-Authenticate: Basic
-curl http://localhost:8083/actuator/health                       # public
-curl -u admin:admin http://localhost:8083/actuator/quartz        # secured
+export CURL_CA_BUNDLE=certs/out/ca.crt   # dev CA: registry, order, product serve HTTPS (root README §9)
+curl -u admin:admin https://localhost:8083/api/products
+curl -u admin:admin https://localhost:8083/api/products/202
+curl -i -u admin:admin https://localhost:8083/api/products/999   # 404
+curl -i https://localhost:8083/api/products                       # 401 + WWW-Authenticate: Basic
+curl https://localhost:8083/actuator/health                       # public
+curl -u admin:admin https://localhost:8083/actuator/quartz        # secured
 ```
 
 **Via the gateway** (`:8080`, which forwards the `Authorization` header downstream):
@@ -139,9 +145,11 @@ SERVER_PORT=8093 mvn -pl product-service spring-boot:run
 
 ```yaml
 eureka:
+  server:
+    instances: [ localhost:8761, 127.0.0.1:8762, 127.0.0.2:8763 ]   # registry nodes, same list in every module
   client:
     service-url:
-      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
+      defaultZone: http://${…}@${eureka.server.instances[0]}/eureka/,http://${…}@${eureka.server.instances[1]}/eureka/,http://${…}@${eureka.server.instances[2]}/eureka/
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # (default 90)
@@ -239,7 +247,7 @@ sequenceDiagram
 ## <span style="color:hsl(116,80%,58%)">5. 📊 Actuator endpoints and SBA views</span>
 
 All 20 endpoints below are listed in `management.endpoints.web.exposure.include`. Only `health` and `info` are public;
-the rest need Basic auth. The cross-module matrix is in [root §10](../README.md#security-and-sba-features).
+the rest need Basic auth. The cross-module matrix is in [root §8](../README.md#security-and-sba-features).
 
 | Endpoint        | SBA view                     | Backing config in this module                                                                                                                                                                                 |
 |-----------------|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -265,12 +273,13 @@ the rest need Basic auth. The cross-module matrix is in [root §10](../README.md
 | `jolokia`       | JMX                          | `jolokia-support-springboot` 2.6.3 (servlet-only, which is why the WebFlux gateway/admin modules lack it)                                                                                                     |
 
 ```bash
-curl -u admin:admin http://localhost:8083/actuator/startup | jq '.timeline.events | length'
-curl -u admin:admin http://localhost:8083/actuator/quartz/jobs/demo/heartbeatJob
-curl -u admin:admin -o heap.hprof http://localhost:8083/actuator/heapdump
+export CURL_CA_BUNDLE=certs/out/ca.crt   # dev CA: registry, order, product serve HTTPS (root README §9)
+curl -u admin:admin https://localhost:8083/actuator/startup | jq '.timeline.events | length'
+curl -u admin:admin https://localhost:8083/actuator/quartz/jobs/demo/heartbeatJob
+curl -u admin:admin -o heap.hprof https://localhost:8083/actuator/heapdump
 curl -u admin:admin -X POST -H 'Content-Type: application/json' \
-     -d '{"configuredLevel":"DEBUG"}' http://localhost:8083/actuator/loggers/com.learning
-curl -u admin:admin -X POST http://localhost:8083/actuator/shutdown   # stops the instance
+     -d '{"configuredLevel":"DEBUG"}' https://localhost:8083/actuator/loggers/com.learning
+curl -u admin:admin -X POST https://localhost:8083/actuator/shutdown   # stops the instance
 ```
 
 ### Health probes, info and tags
@@ -324,9 +333,11 @@ server:
   port: 8083                                    # clashes with Kafka Connect's default
 
 eureka:
+  server:
+    instances: [ localhost:8761, 127.0.0.1:8762, 127.0.0.2:8763 ]   # registry nodes, same list in every module
   client:
     service-url:
-      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
+      defaultZone: http://${…}@${eureka.server.instances[0]}/eureka/,http://${…}@${eureka.server.instances[1]}/eureka/,http://${…}@${eureka.server.instances[2]}/eureka/
   instance:
     prefer-ip-address: true                     # register IP, not hostname
     metadata-map:
@@ -361,7 +372,7 @@ management:
 
 Both classes activate the `test` profile, so [application-test.yml](src/test/resources/application-test.yml) turns the
 Eureka client off. Run with `mvn -pl product-service verify` (surefire runs `*Test`, failsafe runs `*IT`;
-see [root §6](../README.md#tests)).
+see [root §5](../README.md#tests)).
 
 **[ProductControllerTest.java](src/test/java/com/learning/discovery/product/controller/ProductControllerTest.java)** —
 `@WebMvcTest(ProductController.class)` + `@Import(SecurityConfig.class)` + class-level `@WithMockUser`, using `MockMvc`
@@ -515,7 +526,7 @@ spring:
         simple:
           instances:
             product-service:
-              - uri: http://localhost:8083
+              - uri: https://localhost:8083
                 metadata:
                   user.name: admin
                   user.password: admin
@@ -631,7 +642,7 @@ actually do to the JVM, and how do you lock it down?**
 
 - ***Why CSRF matters here*** — Jolokia also accepts GET requests (`/actuator/jolokia/exec/...`), and the
   `/actuator/**` CSRF exemption removes the token check for POSTs. Only the Basic credentials stand in the way, and
-  every module shares them (root [FAQ 7.10](../README.md#faq-shared-credentials-blast-radius)).
+  every module shares them (root [FAQ 12.10](../README.md#faq-shared-credentials-blast-radius)).
 - ***History*** — Jolokia has had its own CVEs (e.g. a JNDI injection in proxy mode in older 1.x releases). Keep it
   patched (2.6.3 here, from `learning-bom`), and keep proxy mode off.
 - ***Lock down, in order of strength***:

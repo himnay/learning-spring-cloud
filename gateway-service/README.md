@@ -24,6 +24,12 @@ API gateway module of [learning-spring-cloud](../README.md). The project-wide
 picture (all 6 modules, Eureka registry flow, Spring Boot Admin) lives in the root
 README; this file covers only what `gateway-service` itself implements.
 
+> 🔒 The gateway still listens on plain HTTP (`:8080`), but routes to `order-service` and `product-service` over
+> ***HTTPS***: they register as secure, so `lb://` resolves to `https://127.0.0.1:<port>`, and the Netty client trusts the dev
+> CA via `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle: trust`. Eureka calls use TLS too
+> ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/gateway/config/EurekaClientTlsConfig.java)). Full guide:
+> root [§9](../README.md#https).
+
 <a id="overview"></a>
 
 ## <span style="color:hsl(288,80%,58%)">1. 🧭 Overview</span>
@@ -66,7 +72,7 @@ README; this file covers only what `gateway-service` itself implements.
 - ***`lb://` = load-balanced service ID*** — Spring Cloud LoadBalancer's `ReactiveLoadBalancerClientFilter` looks the ID
   up in the gateway's local Eureka cache (refreshed every 30s by default), picks an instance (round-robin by default),
   and rewrites the request to that instance's `host:port`. Step by step in [§2](#request-routing-flow); registry
-  side: [root README §2](../README.md#how-the-gateway-finds-services-via-eureka).
+  side: [root README §6](../README.md#how-the-gateway-finds-services-via-eureka).
 - ***Inspect the live route table*** — `GET /actuator/gateway/routes` (authenticated).
 
 <a id="request-routing-flow"></a>
@@ -132,7 +138,7 @@ client ─► gateway-service :8080
 ## <span style="color:hsl(66,80%,50%)">3. 🚀 Run and credentials</span>
 
 - ***Start `eureka-server` first***, then the backends, then the gateway
-  (order: [root README §4](../README.md#run-order)).
+  (order: [root README §3](../README.md#run-order)).
 
 ```bash
 cd learning-spring-cloud
@@ -350,9 +356,11 @@ server:
   port: 8080
 
 eureka:
+  server:
+    instances: [ localhost:8761, 127.0.0.1:8762, 127.0.0.2:8763 ]   # registry nodes, same list in every module
   client:
     service-url:                     # Eureka server is Basic-secured too
-      defaultZone: http://${…}@localhost:8761/eureka/,http://${…}@127.0.0.1:8762/eureka/,http://${…}@127.0.0.2:8763/eureka/
+      defaultZone: http://${…}@${eureka.server.instances[0]}/eureka/,http://${…}@${eureka.server.instances[1]}/eureka/,http://${…}@${eureka.server.instances[2]}/eureka/
   instance:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # (default 90)
@@ -402,7 +410,7 @@ management:
 - ***Not covered*** — actual proxying through `lb://` routes (would need registered backends or a stubbed
   `ServiceInstanceListSupplier`).
 - ***Run*** — `mvn -pl gateway-service verify` (failsafe runs `*IT` in `integration-test`;
-  see [root README §6](../README.md#tests)).
+  see [root README §5](../README.md#tests)).
 
 <a id="gotchas"></a>
 
@@ -410,7 +418,7 @@ management:
 
 - ***503 Service Unavailable on `/api/**`*** — the gateway authenticated you but LoadBalancer found no instance for
   `USER-SERVICE` etc.: backend not started, not yet registered, or the gateway's registry cache hasn't refreshed (up
-  to ~30s, plus Eureka's own response cache). Check http://localhost:8761 and retry.
+  to ~30s, plus Eureka's own response cache). Check https://localhost:8761 and retry.
 - ***401 from the gateway*** — missing/wrong Basic creds, or `ACTUATOR_USER/ACTUATOR_PASSWORD` set differently from what
   the client sends.
 - ***401 that came from the backend*** — gateway and backend run with different credentials; the forwarded header passes
@@ -449,7 +457,7 @@ holding the credentials do to the route table, and why is that worse than on a b
   - ***History*** — CVE-2022-22947 was remote code execution through exactly this endpoint (SpEL in route
     definitions added via the actuator), fixed in Spring Cloud Gateway 3.1.1 / 3.0.7. Patched versions still let an
     authorised caller redirect traffic — that's a feature, not a bug.
-- ***Hardening*** (beyond the shared-credential problem in the root [FAQ 7.10](../README.md#faq-shared-credentials-blast-radius)):
+- ***Hardening*** (beyond the shared-credential problem in the root [FAQ 12.10](../README.md#faq-shared-credentials-blast-radius)):
 
 | Control                    | How                                                                                                    |
 |----------------------------|--------------------------------------------------------------------------------------------------------|
@@ -534,7 +542,7 @@ one bucket here.***
 - ***Timeouts*** — set `spring.cloud.gateway.server.webflux.httpclient.connect-timeout` / `response-timeout`
   globally (unset today), override per route with route metadata (`response-timeout`, `connect-timeout`) — e.g.
   orders with a downstream call to `user-service` get more than plain lookups. Edge timeout > downstream timeout (see
-  root [FAQ 7.11](../README.md#faq-slow-downstream-cascade)).
+  root [FAQ 12.11](../README.md#faq-slow-downstream-cascade)).
 - ***Circuit breaker*** — `CircuitBreaker` filter (Spring Cloud CircuitBreaker + Resilience4j) per route with a
   `fallbackUri: forward:/fallback/users` returning a fast `503` + `Retry-After`, so a dying backend costs microseconds
   instead of a timeout each.
@@ -600,7 +608,7 @@ routes; a gateway-only canary leaks, because `order-service` reaches `user-servi
 - ***Compatibility*** — v1 and v2 serve simultaneously: response shape changes must be additive (old
   `UserSummary` readers in `order-service` must tolerate new fields); DB migrations expand-then-contract.
 - ***Rollback*** — split to 0 % (or deregister v2 instances: `OUT_OF_SERVICE`, see root
-  [FAQ 7.13](../README.md#faq-zero-error-rolling-deploy)); cache layers mean rollback takes up to a couple of
+  [FAQ 12.13](../README.md#faq-zero-error-rolling-deploy)); cache layers mean rollback takes up to a couple of
   minutes to fully apply.
 - ***Decide with data*** — tag spans and metrics with the instance version (a `version` resource attribute or tag),
   compare v1 vs v2 error rate and p99 in Zipkin and metrics; automate promote/rollback on thresholds.

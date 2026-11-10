@@ -195,7 +195,7 @@ a hypothesis test, not "see what happens".***
 | Kill mode           | What callers see                                                                                                    | Expected window                                                                                       |
 |---------------------|---------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
 | `kill -9` (crash)   | ~50 % of user calls go to the dead instance (round robin over 2) until every cache drops it                         | lease ~60 s + sweep ≤ 30 s + server response cache + client fetch + LB cache ≈ up to ~3 min ([eureka-server Q2](../eureka-server/README.md#qa-crash-eviction-timeline)) |
-| SIGTERM (graceful)  | in-flight requests finish; new connections are refused during drain, then deregistration                            | drain + ~95 s of cache layers ([root FAQ 7.13](../README.md#faq-zero-error-rolling-deploy))            |
+| SIGTERM (graceful)  | in-flight requests finish; new connections are refused during drain, then deregistration                            | drain + ~95 s of cache layers ([root FAQ 12.13](../README.md#faq-zero-error-rolling-deploy))            |
 
   - Gateway routes → client-visible 5xx (no `Retry` filter). `/with-user` → still `200`, `user: null` — only visible
     with the body check from [Q2](#qa-blind-checks-thresholds).
@@ -212,4 +212,4 @@ a hypothesis test, not "see what happens".***
   prediction, the model of the system is wrong — that is the real finding.
 - ***Also test*** — killing one eureka node (should be a non-event: clients fail over, caches serve), killing *all*
   eureka nodes (traffic between known instances keeps flowing — [eureka-server Q5](../eureka-server/README.md#qa-full-outage-cold-restart)),
-  and a slow (not dead) instance, which is the nastiest case ([root FAQ 7.11](../README.md#faq-slow-downstream-cascade)).
+  and a slow (not dead) instance, which is the nastiest case ([root FAQ 12.11](../README.md#faq-slow-downstream-cascade)).

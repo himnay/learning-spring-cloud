@@ -9,9 +9,11 @@ import org.springframework.test.web.servlet.client.RestTestClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-// standalone in tests: don't register with or fetch from the other nodes, which aren't running
+// standalone in tests: don't register with or fetch from the other nodes, which aren't running;
+// plain HTTP so RestTestClient needs no trust store (TLS itself is covered by EurekaTlsTests)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"eureka.client.register-with-eureka=false", "eureka.client.fetch-registry=false"})
+        properties = {"eureka.client.register-with-eureka=false", "eureka.client.fetch-registry=false",
+                "server.ssl.enabled=false"})
 class EurekaServerApplicationTests {
 
     @LocalServerPort
