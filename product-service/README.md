@@ -26,9 +26,12 @@ view matrix) lives in the
 [root README](../README.md); this file covers only what `product-service` itself does.
 
 > 🔒 ***HTTPS only*** on `:8083` (`server.ssl.bundle: ${app.tls.server-bundle}` → bundle `service-identity`); registers in Eureka as `https://127.0.0.1:8083`
-> (`secure-port-enabled`, `ip-address`), and calls the registry over TLS through the `internal-ca` bundle
-> ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/product/config/EurekaClientTlsConfig.java)). Run
-> `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt`. Full guide: root [§9](../README.md#https).
+> (`secure-port-enabled`, `ip-address`), and calls the registry over mutual TLS with its own certificate,
+> `CN=product-service`, from the same bundle ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/product/config/EurekaClientTlsConfig.java)).
+> Callers authenticate with their own certificate too (mutual TLS, `server.ssl.client-auth: want`): [`ClientCertificateSubjectFilter`](src/main/java/com/learning/discovery/product/config/ClientCertificateSubjectFilter.java) allows the subjects in
+> `app.tls.client-cert.allowed-subjects` (`gateway-service`, `admin-server`), answers any other certificate with `403`, and lets certificate-less
+> callers (browser, curl) through to Basic/form login.
+> Run `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt`. Full guide: root [§9](../README.md#https).
 
 <a id="overview"></a>
 
@@ -547,7 +550,7 @@ Kubernetes `Service`; name a separate actuator port `management` in the Service'
 | B3 | Basic, one shared login    | `httpBasic()` only                                                                  | `spring.boot.admin.instance-auth.default-user-name` / `.default-password`                                                                           |
 | B4 | OAuth2 bearer token        | `spring-boot-starter-oauth2-resource-server`, actuator requires e.g. `SCOPE_actuator` | `client_credentials` client + `InstanceExchangeFilterFunction`, see [admin-server Q7](../admin-server/README.md#qa-basic-ui-oauth-backend)           |
 | B5 | Custom header / API key    | a filter that checks e.g. `X-Api-Key` on `/actuator/**`                             | a `ReactiveHttpHeadersProvider` (or `HttpHeadersProvider`) bean returning that header                                                               |
-| B6 | mutual TLS                 | `server.ssl.client-auth: need` and register https (`eureka.instance.secure-port-enabled: true`) | admin-server's instance `WebClient` configured with a client certificate                                                         |
+| B6 | mutual TLS (**used here too**, on top of B1) | `server.ssl.client-auth: want` + `ClientCertificateSubjectFilter` allow-listing `CN=admin-server`; registered https | `spring.http.clients.ssl.bundle` with a key store (admin-server's `service-identity` bundle) |
 | B7 | network only (no auth)     | `permitAll()` on `/actuator/**`, ideally on an internal-only `management.server.port` | nothing                                                                                                                                      |
 
 - ***B1–B3 are tried in that order*** — SBA's `BasicAuthHttpHeaderProvider` uses metadata first, then `service-map`,

@@ -6,7 +6,7 @@
 2. 🚀 [Run and log in](#run-and-login)
 3. 🔐 [Security in detail](#security)
 4. 🔑 [Types of supported security](#login-options)
-5. 🔒 [HTTPS to the registry and the services](#https)
+5. 🔒 [HTTPS and mutual TLS to the registry and the services](#https)
 6. 📡 [Actuator endpoints exposed](#actuator-endpoints)
 7. ⏱️ [Quartz demo job](#quartz)
 8. 📝 [Logging to file](#logging)
@@ -69,8 +69,9 @@ overview: [../README.md](../README.md).
   the registry nodes `localhost:8761`, `127.0.0.1:8762`, `127.0.0.2:8763`), so it appears in
   its own dashboard as `ADMIN-SERVER`, next to `EUREKA-SERVER`, `USER-SERVICE`,
   `ORDER-SERVICE`, `PRODUCT-SERVICE` and `GATEWAY-SERVICE`.
-- ***Talks TLS to the registry and to order/product.*** Eureka client and SBA's `InstanceWebClient` both trust the
-  dev CA through the `internal-ca` SSL bundle, and the UI itself is served over HTTPS with `service-identity` ([§5](#https)).
+- ***Talks mutual TLS to the registry and to every service.*** Eureka client and SBA's `InstanceWebClient` both use
+  the `service-identity` SSL bundle (trust the dev CA, present `CN=admin-server`), and the UI itself is served over
+  HTTPS with the same bundle ([§5](#https)).
 - Entry point: [AdminServerApplication.java](src/main/java/com/learning/discovery/admin/AdminServerApplication.java),
   annotated with `@EnableAdminServer` + `@SpringBootApplication`.
 
@@ -268,7 +269,7 @@ How *SBA* authenticates to each service:
 | ***Metadata Basic auth (current)***      | each service sets `eureka.instance.metadata-map.user.name/user.password`; `BasicAuthHttpHeaderProvider` sends it                                                                                                                                                                                                                     | simple, but the password sits in the Eureka registry, so anyone who can read `/eureka/apps` can see it |
 | Per-service defaults                     | `spring.boot.admin.instance-auth.service-map.<service-name>.user-name/user-password`                                                                                                                                                                                                                                                 | keeps credentials out of the registry; they're configured centrally in admin-server                    |
 | ***OAuth2 client credentials (bearer)*** | custom `HttpHeadersProvider` bean that gets a token through `ReactiveOAuth2AuthorizedClientManager` (client-credentials grant) and sets `Authorization: Bearer ...`; each service becomes a JWT resource server (`spring-boot-starter-oauth2-resource-server`, `http.oauth2ResourceServer(jwt())`) that requires an `actuator` scope | no shared passwords; tokens expire and can be revoked; per-service scopes                              |
-| mTLS                                     | SBA's `WebClient` configured with a client key store; services require client certs on the management port                                                                                                                                                                                                                           | strongest transport identity; you have to run a certificate PKI                                        |
+| ***mTLS (current, alongside Basic)***    | `spring.http.clients.ssl.bundle` with a key store; each service allow-lists `CN=admin-server` in its `ClientCertificateSubjectFilter` ([§5](#https))                                                                                                                                                                                                                           | strongest transport identity; you have to run a certificate PKI                                        |
 
 - ***Recommendation for production***: ***Keycloak (or any OIDC IdP) for
   dashboard login*** + ***OAuth2 client credentials*** for SBA→service calls.
@@ -277,31 +278,44 @@ How *SBA* authenticates to each service:
 
 <a id="https"></a>
 
-## <span style="color:hsl(45,80%,55%)">5. 🔒 HTTPS to the registry and the services</span>
+## <span style="color:hsl(45,80%,55%)">5. 🔒 HTTPS and mutual TLS to the registry and the services</span>
 
 admin-server serves its UI and API over HTTPS (`:8084`, bundle `service-identity` via `app.tls.server-bundle`),
-registers in Eureka as `https://127.0.0.1:8084`, and both of its outbound paths use TLS where the target serves it. Whole-stack guide: root [§9](../README.md#https).
+registers in Eureka as `https://127.0.0.1:8084`, and both of its outbound paths are mutual TLS: they present its own
+certificate, `CN=admin-server,OU=learning-spring-cloud`, which every service allows. Whole-stack guide: root
+[§9](../README.md#https).
 
 | Outbound call                                   | Client                                   | TLS config                                                                 |
 |-------------------------------------------------|------------------------------------------|----------------------------------------------------------------------------|
-| Browser → UI/API (`https://localhost:8084`)      | Reactor Netty server                      | `server.ssl.bundle: ${app.tls.server-bundle}` (`service-identity`, `tls/server.p12`); plain `http://` connections are closed |
-| Eureka client → registry (`https://…:8761-8763`) | `CloudEurekaClient`, RestClient transport | bundle `internal-ca` via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/admin/config/EurekaClientTlsConfig.java) |
-| SBA → each instance's actuator (itself included) | `InstanceWebClient` (Reactor Netty)       | `spring.http.clients.ssl.bundle: ${app.tls.trust-bundle}` in [`application.yml`](src/main/resources/application.yml) |
+| Browser → UI/API (`https://localhost:8084`)      | Reactor Netty server                      | `server.ssl.bundle: ${app.tls.server-bundle}` (`service-identity`, `tls/identity.p12`), `client-auth: want`; plain `http://` connections are closed |
+| Eureka client → registry (`https://…:8761-8763`) | `CloudEurekaClient`, RestClient transport | `app.tls.client-bundle` via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/admin/config/EurekaClientTlsConfig.java) |
+| SBA → each instance's actuator (itself included) | `InstanceWebClient` (Reactor Netty)       | `spring.http.clients.ssl.bundle: ${app.tls.client-bundle}` in [`application.yml`](src/main/resources/application.yml) |
 
 - ***Why one property is enough for SBA*** — `AdminServerInstanceWebClientConfiguration` builds
   `InstanceWebClient.builder(webClient)` from the `WebClient.Builder` bean Boot auto-configures; Boot applies
   `spring.http.clients.*` (timeouts, redirects, ***SSL bundle***) to that builder's `ClientHttpConnector`. Status
   polling, endpoint detection, info polling and every proxied view (`/instances/{id}/actuator/**`) go through it.
-  HTTP targets (user-service, gateway, admin-server itself) are unaffected: the bundle only matters on a TLS handshake.
+  The bundle has a key store, so the connector also answers each service's certificate request with admin-server's
+  certificate. HTTP targets (the gateway) are unaffected: the bundle only matters on a TLS handshake.
 - ***Where the `https://` comes from*** — SBA never sees the target's `server.ssl`. `EurekaServiceInstanceConverter`
   takes the health URL from `InstanceInfo.secureHealthCheckUrl` (set when the target registers with
   `secure-port-enabled: true`) and the service/management URL from `EurekaServiceInstance.getUri()`, which is
-  `https://host:securePort` for secure instances. So order, product and the registry nodes show `https://` health
-  URLs in the instance list; user-service and gateway keep `http://`.
+  `https://host:securePort` for secure instances. So every service except the gateway shows an `https://` health
+  URL in the instance list; the gateway keeps `http://`.
+- ***Who may call admin-server: a WebFlux `ClientCertificateSubjectFilter`***. SBA 4 runs on Netty, so
+  [the filter](src/main/java/com/learning/discovery/admin/config/ClientCertificateSubjectFilter.java) is a `WebFilter`
+  (order `-110`, before Spring Security's `WebFilterChainProxy` at `-100`). It reads the client certificate from
+  `ServerHttpRequest.getSslInfo().getPeerCertificates()` instead of the servlet attribute the other services use.
+  Only `CN=admin-server,OU=learning-spring-cloud` is allowed: SBA polls its own actuator through its Eureka
+  registration. Any other certificate (the gateway's, `dev-cli`) gets `403`. Browsers send no certificate and fall
+  through to the login page.
+- ***A 403 from a service looks like `DOWN`/`OFFLINE`***: if a service removes `CN=admin-server` from its
+  `allowed-subjects`, SBA's health poll gets `403` and the instance turns red. The service's log has the
+  `ClientCertificateSubjectFilter : 403 …` line.
 - ***Trust failures look like `OFFLINE`*** — a handshake error is an exception in `StatusUpdater`, which maps
   exceptions to `OFFLINE` (not `DOWN`). Check the admin-server log for `PKIX path building failed` or
   `No subject alternative names`.
-- ***The bundle trusts only the dev CA*** — a target with a public certificate would fail; add its CA to
+- ***The bundle trusts only the dev CA***: a target with a public certificate would fail; add its CA to
   `truststore.p12` (or use a PEM bundle with several certificates).
 
 <a id="actuator-endpoints"></a>
@@ -1297,7 +1311,7 @@ spring:
                   user.name: admin
                   user.password: admin
             user-service:
-              - uri: http://localhost:8081
+              - uri: https://localhost:8081
               - uri: http://localhost:8091          # 2nd instance
 ```
 

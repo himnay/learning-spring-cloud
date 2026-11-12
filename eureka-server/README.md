@@ -5,7 +5,7 @@
 1. 🧭 [Overview](#overview)
 2. 🚀 [Run it](#run-it)
 3. 🔐 [Security](#security)
-4. 🔒 [HTTPS](#https)
+4. 🔒 [HTTPS and mutual TLS](#https)
 5. 📊 [Actuator endpoints and SBA views](#actuator-endpoints)
 6. ⏱️ [Quartz demo job, file logging, configuration](#quartz-logging-config)
 7. 🔬 [Internals: eureka-core 2.0.6](#eureka-core-internals)
@@ -240,18 +240,34 @@ sequenceDiagram
 
 <a id="https"></a>
 
-## <span style="color:hsl(45,80%,55%)">4. 🔒 HTTPS</span>
+## <span style="color:hsl(45,80%,55%)">4. 🔒 HTTPS and mutual TLS</span>
 
-Every node serves ***HTTPS only*** on its port (`server.ssl.bundle: ${app.tls.server-bundle}` → `service-identity`), registers itself as secure
-(`secure-port-enabled: true`, `non-secure-port-enabled: false`) and talks to its peers over TLS. The step-by-step
-conversion for the whole stack is in the root [§9](../README.md#https); this is the registry's part.
+Every node serves ***HTTPS only*** on its port (`server.ssl.bundle: ${app.tls.server-bundle}` → `service-identity`),
+asks callers for a client certificate (`server.ssl.client-auth: want`), registers itself as secure
+(`secure-port-enabled: true`, `non-secure-port-enabled: false`) and talks to its peers over mutual TLS with its own
+certificate, `CN=eureka-server,OU=learning-spring-cloud`. The step-by-step conversion for the whole stack is in the
+root [§9](../README.md#https); this is the registry's part.
 
-| Path                                   | Client library                                   | How it gets the `internal-ca` bundle                                                        |
+| Path                                   | Client library                                   | How it gets the `service-identity` bundle                                               |
 |----------------------------------------|--------------------------------------------------|----------------------------------------------------------------------------------------|
-| Inbound: clients, peers, SBA, browser  | Tomcat                                           | `service-identity` bundle (`tls/server.p12`, SAN `localhost`, `127.0.0.1`, `127.0.0.2`) |
+| Inbound: clients, peers, SBA, browser  | Tomcat                                           | `server.ssl.bundle` (`tls/identity.p12`, SAN `localhost`, `127.0.0.1`, `127.0.0.2`; client certificates verified against `tls/truststore.p12`) |
 | Own Eureka client → peers (register, fetch) | Jersey 3 (`Jersey3TransportClientFactories`) | `Jersey3DiscoveryClientOptionalArgs.setSSLContext(...)` in [`EurekaTlsConfig`](src/main/java/com/learning/discovery/eureka/config/EurekaTlsConfig.java) |
 | Peer replication (`/eureka/peerreplication/batch`) | Jersey 3 + Apache HttpClient 4 (`Jersey3ReplicationClient`) | custom `PeerEurekaNodes` (`TlsPeerEurekaNodes`) in the same class                |
 
+- ***Who may call the registry: `ClientCertificateSubjectFilter`***: [the filter](src/main/java/com/learning/discovery/eureka/config/ClientCertificateSubjectFilter.java)
+  (servlet, order `-110`, before Spring Security) checks the subject of the client certificate against
+  `app.tls.client-cert.allowed-subjects`. All six services are on the list (every one of them registers), and so is
+  `eureka-server` itself for the peers. A certificate with any other subject gets `403`. `/eureka/peerreplication/**`
+  is in `required-paths`: a replication batch without a certificate gets `403 client certificate required`, so a
+  leaked Basic password alone can no longer inject registrations through replication. Everything else accepts
+  certificate-less callers: zipkin-server registers without one (Armeria's TLS client sends none), and browsers and
+  curl send none either.
+
+  ```bash
+  export CURL_CA_BUNDLE=certs/out/ca.crt
+  curl -u admin:admin --cert certs/out/dev-cli.crt --key certs/out/dev-cli.key https://localhost:8761/eureka/apps
+  # 403 client certificate subject not allowed: CN=dev-cli,OU=learning-spring-cloud
+  ```
 - ***Why replication needs its own bean*** — Spring Cloud's `RefreshablePeerEurekaNodes.createReplicationClient`
   builds each peer client with `EurekaJersey3ClientBuilder`. Without the system property
   `com.netflix.eureka.shouldSSLConnectionsUseSystemSocketFactory=true` the builder creates a plain
@@ -259,20 +275,26 @@ conversion for the whole stack is in the root [§9](../README.md#https); this is
   only other knob, `withTrustStoreFile(path, password)`, wants a JKS file and switches hostname verification off.
   `TlsPeerEurekaNodes.createPeerEurekaNode` builds the same client by hand — Apache connector, peer-node timeouts and
   pool sizes, full JSON codec, `Jersey3DynamicGZIPContentEncodingFilter`, `EurekaIdentityHeaderFilter` — with
-  `new SSLConnectionSocketFactory(sslContext)` (default hostname verifier) registered for `https`.
+  `new SSLConnectionSocketFactory(sslContext)` (default hostname verifier) registered for `https`. The
+  `SSLContext` comes from the client bundle, so its key manager presents this node's certificate to the peer.
 - ***What you give up*** — `RefreshablePeerEurekaNodes` also re-resolves peers on an `EnvironmentChangeEvent`
   (`/actuator/refresh` after changing `defaultZone`); `TlsPeerEurekaNodes` doesn't. The periodic peer-list update of
   `PeerEurekaNodes.start()` (every `peer-eureka-nodes-update-interval-ms`, 10 min) still applies changes.
 - ***Basic auth still in the URL*** — `Jersey3ReplicationClient` (via `AbstractJersey3EurekaHttpClient`) turns the
   `admin:admin@` user-info of each peer URL into an `HttpAuthenticationFeature.basic(...)`, over TLS now.
 - ***Tests*** — [`EurekaServerApplicationTests`](src/test/java/com/learning/discovery/eureka/EurekaServerApplicationTests.java)
-  runs with `server.ssl.enabled=false` (plain `RestTestClient`);
-  [`EurekaTlsTests`](src/test/java/com/learning/discovery/eureka/EurekaTlsTests.java) keeps TLS on: `200` with the
-  `internal-ca` bundle, `SSLHandshakeException` with the JDK default trust store, and `TlsPeerEurekaNodes` in place.
+  runs with `server.ssl.enabled=false` (plain `RestTestClient`, filter off);
+  [`EurekaTlsTests`](src/test/java/com/learning/discovery/eureka/EurekaTlsTests.java) keeps TLS on and does real
+  handshakes. With the node's certificate, `/eureka/apps` and a replication batch get `200`. Without one,
+  `/eureka/apps` still gets `200` but replication gets `403`. The JDK default trust store gets an
+  `SSLHandshakeException`, and `TlsPeerEurekaNodes` is in place.
+  [`ClientCertificateSubjectFilterTests`](src/test/java/com/learning/discovery/eureka/config/ClientCertificateSubjectFilterTests.java)
+  covers the subject rules.
 - ***Verify replication over TLS*** — register anything with one node and read it from another:
   `curl --cacert certs/out/ca.crt -u admin:admin -H 'Accept: application/json' https://127.0.0.1:8762/eureka/apps`.
   A node whose peer is down logs `Network level connection to peer 127.0.0.2; retrying after delay`; a trust problem
-  shows `PKIX path building failed` instead.
+  shows `PKIX path building failed` instead, and a peer without its certificate shows `403` in the receiving node's
+  log (`ClientCertificateSubjectFilter : 403 POST /eureka/peerreplication/batch/ … client certificate required`).
 
 <a id="actuator-endpoints"></a>
 

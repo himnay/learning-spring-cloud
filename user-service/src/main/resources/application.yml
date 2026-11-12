@@ -1,6 +1,9 @@
 server:
   port: 8081
   shutdown: graceful   # Boot 3.4+ default, explicit here: finish in-flight requests (max spring.lifecycle.timeout-per-shutdown-phase, 30 s) before stopping
+  ssl:
+    bundle: ${app.tls.server-bundle}   # HTTPS only on this port; plain http:// requests get a 400
+    client-auth: want   # ask callers for a certificate (verified against the bundle truststore); none is still accepted
 
 spring:
   application:
@@ -8,8 +11,14 @@ spring:
   ssl:
     bundle: # spring.ssl.bundle.jks.<name>: TLS material by name; certs/generate-certs.sh writes src/main/resources/tls/
       jks:
-        internal-ca: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig)
-          truststore:
+        service-identity: # this service's own certificate (CN=user-service,OU=learning-spring-cloud) + the CA it trusts, used in both directions
+          key:
+            alias: identity
+          keystore: # presented as server certificate (server.ssl.bundle) and as client certificate when a server asks (mTLS)
+            location: classpath:tls/identity.p12
+            password: ${TLS_KEYSTORE_PASSWORD:changeit}
+            type: PKCS12
+          truststore: # the dev CA: verifies servers this service calls, and client certificates sent to it
             location: classpath:tls/truststore.p12
             password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
             type: PKCS12
@@ -37,7 +46,14 @@ spring:
 
 app:
   tls: # SSL bundle names, declared once here; server.ssl, HTTP clients and the Eureka TLS beans all reference these
-    trust-bundle: internal-ca         # spring.ssl.bundle.jks.internal-ca: CA this process trusts as a client
+    server-bundle: service-identity   # inbound: certificate Tomcat presents + CA that client certificates must chain to
+    client-bundle: service-identity   # outbound: certificate sent when a server asks for one + CA that servers must chain to
+    client-cert: # ClientCertificateSubjectFilter: whose certificate may call this service
+      allowed-subjects: # routed API calls, order-service UserClient, SBA actuator polling; any other subject -> 403
+        - "CN=gateway-service,OU=learning-spring-cloud"
+        - "CN=order-service,OU=learning-spring-cloud"
+        - "CN=admin-server,OU=learning-spring-cloud"
+      required-paths: [] # no certificate is fine everywhere (browser, curl): Basic/form login still applies. "/**" = strict mTLS
   security:
     public-paths: # reachable without auth; everything else needs Basic/form login
       - "/actuator/health/**"
@@ -61,6 +77,11 @@ eureka:
     lease-renewal-interval-in-seconds: 10      # heartbeat every 10 s (default 30)
     lease-expiration-duration-in-seconds: 30   # evicted 30 s after the last heartbeat (default 90)
     prefer-ip-address: true
+    # registered as https://127.0.0.1:<port>: callers (gateway, order-service, SBA) build the URL from these, and verify the
+    # host against the certificate SAN (localhost, 127.0.0.1, 127.0.0.2). Without ip-address the LAN IP is registered.
+    ip-address: ${EUREKA_INSTANCE_IP:127.0.0.1}
+    secure-port-enabled: true        # InstanceInfo.securePort = server.port, isSecure() -> https:// URIs
+    non-secure-port-enabled: false   # nothing listens for plain HTTP
     metadata-map: # SBA reads these to authenticate against /actuator
       "[user.name]": ${spring.security.user.name}
       "[user.password]": ${spring.security.user.password}

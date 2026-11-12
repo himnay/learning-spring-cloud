@@ -10,9 +10,10 @@ import org.springframework.web.client.RestClientException;
 import java.util.Optional;
 
 // Calls user-service directly (bypassing gateway-service) to show service-to-service
-// load-balanced calls: "http://USER-SERVICE" is a Eureka service id, resolved to a live
+// load-balanced calls: "https://USER-SERVICE" is a Eureka service id, resolved to a live
 // instance by Spring Cloud LoadBalancer because the RestClient.Builder is @LoadBalanced.
-// user-service is secured with the same shared credentials, so every call sends Basic auth.
+// user-service is secured with the same shared credentials, so every call sends Basic auth; TLS (with
+// order-service's client certificate) comes from LoadBalancerConfig.
 @Component
 public class UserClient {
 
@@ -22,7 +23,7 @@ public class UserClient {
                       @Value("${spring.security.user.name}") String username,
                       @Value("${spring.security.user.password}") String password) {
         this.restClient = loadBalancedRestClientBuilder
-                .baseUrl("http://USER-SERVICE")
+                .baseUrl("https://USER-SERVICE")
                 .defaultHeaders(headers -> headers.setBasicAuth(username, password))
                 .build();
     }

@@ -22,8 +22,13 @@ Eureka client exposing a read-only `/api/users` API. One of the 6 modules of the
 service-discovery demo — see the root [../README.md](../README.md) for the
 whole picture (Eureka, gateway, Spring Boot Admin, run order).
 
-> 🔒 user-service still serves plain HTTP (`:8081`), but registers, renews and fetches over ***HTTPS*** (`https://`
-> `defaultZone`, `internal-ca` SSL bundle via [`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/user/config/EurekaClientTlsConfig.java)).
+> 🔒 ***HTTPS only*** on `:8081` (`server.ssl.bundle: ${app.tls.server-bundle}` → bundle `service-identity`); registers in Eureka as `https://127.0.0.1:8081`
+> (`secure-port-enabled`, `ip-address`), and calls the registry over mutual TLS with its own certificate,
+> `CN=user-service`, from the same bundle ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/user/config/EurekaClientTlsConfig.java)).
+> Callers authenticate with their own certificate too (mutual TLS, `server.ssl.client-auth: want`): [`ClientCertificateSubjectFilter`](src/main/java/com/learning/discovery/user/config/ClientCertificateSubjectFilter.java) allows the subjects in
+> `app.tls.client-cert.allowed-subjects` (`gateway-service`, `order-service`, `admin-server`), answers any other certificate with `403`, and lets certificate-less
+> callers (browser, curl) through to Basic/form login.
+> Run `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt` (or `export CURL_CA_BUNDLE=certs/out/ca.crt`).
 > Full guide: root [§9](../README.md#https).
 
 <a id="overview"></a>
@@ -49,7 +54,7 @@ whole picture (Eureka, gateway, Spring Boot Admin, run order).
 | Tracing        | `spring-boot-starter-opentelemetry` → OTLP to [../zipkin-server](../zipkin-server/README.md)           |
 | Security       | `spring-boot-starter-security`                                                                         |
 | Scheduling     | `spring-boot-starter-quartz` (in-memory job store)                                                     |
-| API docs       | `springdoc-openapi-starter-webmvc-ui` → http://localhost:8081/swagger-ui.html                          |
+| API docs       | `springdoc-openapi-starter-webmvc-ui` → https://localhost:8081/swagger-ui.html                          |
 | Boilerplate    | Lombok (`@Slf4j` in the Quartz job)                                                                    |
 | Tests          | `spring-boot-starter-webmvc-test`, `spring-boot-starter-security-test`, `spring-boot-testcontainers` + Testcontainers Postgres |
 
@@ -105,11 +110,11 @@ ACTUATOR_USER=ops ACTUATOR_PASSWORD=s3cret mvn -pl user-service spring-boot:run
 ```bash
 export CURL_CA_BUNDLE=certs/out/ca.crt   # dev CA: registry, order, product serve HTTPS (root README §9)
 # direct
-curl -u admin:admin http://localhost:8081/api/users
-curl -u admin:admin http://localhost:8081/api/users/2
-curl -u admin:admin -i http://localhost:8081/api/users/999   # 404
-curl -i http://localhost:8081/api/users                       # 401, no credentials
-curl http://localhost:8081/actuator/health                    # public
+curl -u admin:admin https://localhost:8081/api/users
+curl -u admin:admin https://localhost:8081/api/users/2
+curl -u admin:admin -i https://localhost:8081/api/users/999   # 404
+curl -i https://localhost:8081/api/users                       # 401, no credentials
+curl https://localhost:8081/actuator/health                    # public
 
 # via gateway-service (8080) -> lb://USER-SERVICE
 curl -u admin:admin http://localhost:8080/api/users
@@ -155,8 +160,9 @@ eureka:
 - ***Credentialed `defaultZone`:*** `eureka-server` is itself behind HTTP Basic, so the user-info part of the URL makes
   the Eureka client send an `Authorization` header on register / heartbeat / registry fetch.
 - ***`prefer-ip-address: true`:*** the instance registers its ***IP address*** instead of its hostname, so callers
-  (gateway, `order-service`, SBA) build URLs like `http://192.168.x.y:8081` — avoids unresolvable hostnames across
-  machines/containers.
+  (gateway, `order-service`, SBA) build URLs from it, avoiding unresolvable hostnames across machines/containers.
+  `ip-address: 127.0.0.1` pins it to an address in the certificate SAN, so callers build `https://127.0.0.1:8081`
+  (the LAN IP would fail hostname verification).
 - ***Metadata-map credentials:*** Spring Boot Admin discovers this instance from Eureka and reads the `user.name` /
   `user.password` metadata keys to authenticate its calls to `/actuator/**`.
 - ***Why `"[user.name]"`:*** in Spring Boot relaxed binding a `.` in a YAML key means nesting, so `user.name:` would
@@ -247,10 +253,10 @@ sequenceDiagram
 | `jolokia`        | JMX                          | `jolokia-support-springboot` 2.6.3 (JMX over HTTP)                                                                                   |
 
 ```bash
-curl -u admin:admin http://localhost:8081/actuator                       # list of links
-curl -u admin:admin http://localhost:8081/actuator/quartz/jobs/demo/heartbeatJob
-curl -u admin:admin http://localhost:8081/actuator/auditevents
-curl -u admin:admin -X POST http://localhost:8081/actuator/loggers/com.learning \
+curl -u admin:admin https://localhost:8081/actuator                       # list of links
+curl -u admin:admin https://localhost:8081/actuator/quartz/jobs/demo/heartbeatJob
+curl -u admin:admin https://localhost:8081/actuator/auditevents
+curl -u admin:admin -X POST https://localhost:8081/actuator/loggers/com.learning \
      -H 'Content-Type: application/json' -d '{"configuredLevel":"DEBUG"}'
 ```
 
@@ -488,7 +494,7 @@ spring:
         simple:
           instances:
             user-service:
-              - uri: http://localhost:8081
+              - uri: https://localhost:8081
                 metadata:
                   user.name: admin
                   user.password: admin
@@ -509,7 +515,7 @@ Kubernetes `Service`; name a separate actuator port `management` in the Service'
 | B3 | Basic, one shared login    | `httpBasic()` only                                                                  | `spring.boot.admin.instance-auth.default-user-name` / `.default-password`                                                                           |
 | B4 | OAuth2 bearer token        | `spring-boot-starter-oauth2-resource-server`, actuator requires e.g. `SCOPE_actuator` | `client_credentials` client + `InstanceExchangeFilterFunction`, see [admin-server Q7](../admin-server/README.md#qa-basic-ui-oauth-backend)           |
 | B5 | Custom header / API key    | a filter that checks e.g. `X-Api-Key` on `/actuator/**`                             | a `ReactiveHttpHeadersProvider` (or `HttpHeadersProvider`) bean returning that header                                                               |
-| B6 | mutual TLS                 | `server.ssl.client-auth: need` and register https (`eureka.instance.secure-port-enabled: true`) | admin-server's instance `WebClient` configured with a client certificate                                                         |
+| B6 | mutual TLS (**used here too**, on top of B1) | `server.ssl.client-auth: want` + `ClientCertificateSubjectFilter` allow-listing `CN=admin-server`; registered https | `spring.http.clients.ssl.bundle` with a key store (admin-server's `service-identity` bundle) |
 | B7 | network only (no auth)     | `permitAll()` on `/actuator/**`, ideally on an internal-only `management.server.port` | nothing                                                                                                                                      |
 
 - ***B1–B3 are tried in that order*** — SBA's `BasicAuthHttpHeaderProvider` uses metadata first, then `service-map`,

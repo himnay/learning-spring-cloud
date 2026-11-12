@@ -8,8 +8,14 @@ spring:
   ssl:
     bundle: # spring.ssl.bundle.jks.<name>: TLS material by name; certs/generate-certs.sh writes src/main/resources/tls/
       jks:
-        internal-ca: # CA trusted when this process calls an https:// URL (Eureka client: EurekaClientTlsConfig; routed calls: gateway httpclient.ssl.ssl-bundle)
-          truststore:
+        service-identity: # this service's own certificate (CN=gateway-service,OU=learning-spring-cloud) + the CA it trusts, used in both directions
+          key:
+            alias: identity
+          keystore: # presented as server certificate (server.ssl.bundle) and as client certificate when a server asks (mTLS)
+            location: classpath:tls/identity.p12
+            password: ${TLS_KEYSTORE_PASSWORD:changeit}
+            type: PKCS12
+          truststore: # the dev CA: verifies servers this service calls, and client certificates sent to it
             location: classpath:tls/truststore.p12
             password: ${TLS_TRUSTSTORE_PASSWORD:changeit}
             type: PKCS12
@@ -26,7 +32,7 @@ spring:
         webflux:
           httpclient:
             ssl:
-              ssl-bundle: ${app.tls.trust-bundle}   # lb:// picks https for instances registered secure (order, product)
+              ssl-bundle: ${app.tls.client-bundle}   # lb:// picks https for instances registered secure (order, product)
           # Authorization header is forwarded to downstream as-is (no RemoveRequestHeader filter) —
           # user/order/product services require the same Basic creds the client sent to the gateway.
           routes:
@@ -78,7 +84,7 @@ springdoc:
 
 app:
   tls: # SSL bundle names, declared once here; server.ssl, HTTP clients and the Eureka TLS beans all reference these
-    trust-bundle: internal-ca         # spring.ssl.bundle.jks.internal-ca: CA this process trusts as a client
+    client-bundle: service-identity   # outbound: certificate sent when a server asks for one + CA that servers must chain to
   security:
     public-paths: # reachable without auth; everything else needs Basic/form login
       - "/actuator/health/**"

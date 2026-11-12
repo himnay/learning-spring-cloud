@@ -34,8 +34,9 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 
 /**
- * The two outbound HTTPS paths of a registry node, both trusting the CA in the SSL bundle named by
- * {@code app.tls.trust-bundle}.
+ * The two outbound HTTPS paths of a registry node, both using the SSL bundle named by {@code app.tls.client-bundle}:
+ * they trust its CA and present this node's certificate (CN=eureka-server) to the peer, whose
+ * ClientCertificateSubjectFilter requires it on /eureka/peerreplication/**.
  * Neither reads {@code spring.ssl.bundle.*} on its own:
  * <ol>
  * <li><b>Own Eureka client</b> (registers this node with its peers, fetches the registry). On the server
@@ -53,9 +54,9 @@ class EurekaTlsConfig {
 
     @Bean
     Jersey3DiscoveryClientOptionalArgs jersey3DiscoveryClientOptionalArgs(SslBundles sslBundles,
-                                                                          @Value("${app.tls.trust-bundle}") String trustBundle) {
+                                                                          @Value("${app.tls.client-bundle}") String clientBundle) {
         Jersey3DiscoveryClientOptionalArgs args = new Jersey3DiscoveryClientOptionalArgs();
-        args.setSSLContext(sslBundles.getBundle(trustBundle).createSslContext());
+        args.setSSLContext(sslBundles.getBundle(clientBundle).createSslContext());
         return args;
     }
 
@@ -64,9 +65,9 @@ class EurekaTlsConfig {
     PeerEurekaNodes peerEurekaNodes(PeerAwareInstanceRegistry registry, EurekaServerConfig serverConfig,
                                     EurekaClientConfig clientConfig, ServerCodecs serverCodecs,
                                     ApplicationInfoManager applicationInfoManager, SslBundles sslBundles,
-                                    @Value("${app.tls.trust-bundle}") String trustBundle) {
+                                    @Value("${app.tls.client-bundle}") String clientBundle) {
         return new TlsPeerEurekaNodes(registry, serverConfig, clientConfig, serverCodecs, applicationInfoManager,
-                sslBundles.getBundle(trustBundle).createSslContext());
+                sslBundles.getBundle(clientBundle).createSslContext());
     }
 
     /**

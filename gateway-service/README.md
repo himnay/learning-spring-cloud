@@ -30,11 +30,13 @@ API gateway module of [learning-spring-cloud](../README.md). The project-wide
 picture (all 6 modules, Eureka registry flow, Spring Boot Admin) lives in the root
 README; this file covers only what `gateway-service` itself implements.
 
-> 🔒 The gateway still listens on plain HTTP (`:8080`), but routes to `order-service` and `product-service` over
-> ***HTTPS***: they register as secure, so `lb://` resolves to `https://127.0.0.1:<port>`, and the Netty client trusts the dev
-> CA via `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle: ${app.tls.trust-bundle}` (bundle `internal-ca`). Eureka calls use TLS too
-> ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/gateway/config/EurekaClientTlsConfig.java)). Full guide:
-> root [§9](../README.md#https).
+> 🔒 The gateway still listens on plain HTTP (`:8080`), but routes to user, order and product over ***mutual TLS***: they
+> register as secure, so `lb://` resolves to `https://127.0.0.1:<port>`. The Netty client takes trust **and** key managers
+> from `spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle: ${app.tls.client-bundle}` (bundle `service-identity`),
+> so it verifies the service and presents the gateway's certificate, `CN=gateway-service`, which each service's
+> `ClientCertificateSubjectFilter` allows. Eureka calls use the same bundle
+> ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/gateway/config/EurekaClientTlsConfig.java)). There's no inbound
+> filter here: the gateway has no TLS listener, so no client certificate reaches it. Full guide: root [§9](../README.md#https).
 
 <a id="overview"></a>
 
@@ -268,7 +270,7 @@ sequenceDiagram
     LB->>LB: instance.isSecure() ? https : http → reconstructURI<br/>GATEWAY_REQUEST_URL_ATTR = https://127.0.0.1:8082/api/orders/101
     LB->>NR: chain.filter
     NR->>NR: HttpHeadersFilter.filterRequest (X-Forwarded-*, hop-by-hop removal)
-    NR->>OS: Reactor Netty HttpClient (pooled, TLS via ssl-bundle internal-ca)
+    NR->>OS: Reactor Netty HttpClient (pooled, mTLS via ssl-bundle service-identity)
     OS-->>NR: 200 + headers → CLIENT_RESPONSE_ATTR / CLIENT_RESPONSE_CONN_ATTR
     NR-->>F: chain completes
     F-->>C: NettyWriteResponseFilter streams the body back (post phase)

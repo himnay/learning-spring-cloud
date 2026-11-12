@@ -28,10 +28,13 @@ chain, SBA feature matrix) lives in the root [../README.md](../README.md); this
 file only covers what is specific to this module.
 
 > 🔒 ***HTTPS only*** on `:8082` (`server.ssl.bundle: ${app.tls.server-bundle}` → bundle `service-identity`); registers in Eureka as `https://127.0.0.1:8082`
-> (`secure-port-enabled`, `ip-address`), and calls the registry over TLS through the `internal-ca` bundle
-> ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/order/config/EurekaClientTlsConfig.java)). Its own call to
-> `user-service` stays HTTP. Run `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt`. Full guide:
-> root [§9](../README.md#https).
+> (`secure-port-enabled`, `ip-address`), and calls the registry ([`EurekaClientTlsConfig`](src/main/java/com/learning/discovery/order/config/EurekaClientTlsConfig.java))
+> and `user-service` ([`LoadBalancerConfig`](src/main/java/com/learning/discovery/order/config/LoadBalancerConfig.java), `https://USER-SERVICE`)
+> over mutual TLS with its own certificate, `CN=order-service`, from the same bundle.
+> Callers authenticate with their own certificate too (mutual TLS, `server.ssl.client-auth: want`): [`ClientCertificateSubjectFilter`](src/main/java/com/learning/discovery/order/config/ClientCertificateSubjectFilter.java) allows the subjects in
+> `app.tls.client-cert.allowed-subjects` (`gateway-service`, `admin-server`), answers any other certificate with `403`, and lets certificate-less
+> callers (browser, curl) through to Basic/form login.
+> Run `./certs/generate-certs.sh` once; `curl` needs `--cacert certs/out/ca.crt`. Full guide: root [§9](../README.md#https).
 
 <a id="overview"></a>
 
@@ -662,7 +665,7 @@ Kubernetes `Service`; name a separate actuator port `management` in the Service'
 | B3 | Basic, one shared login    | `httpBasic()` only                                                                  | `spring.boot.admin.instance-auth.default-user-name` / `.default-password`                                                                           |
 | B4 | OAuth2 bearer token        | `spring-boot-starter-oauth2-resource-server`, actuator requires e.g. `SCOPE_actuator` | `client_credentials` client + `InstanceExchangeFilterFunction`, see [admin-server Q7](../admin-server/README.md#qa-basic-ui-oauth-backend)           |
 | B5 | Custom header / API key    | a filter that checks e.g. `X-Api-Key` on `/actuator/**`                             | a `ReactiveHttpHeadersProvider` (or `HttpHeadersProvider`) bean returning that header                                                               |
-| B6 | mutual TLS                 | `server.ssl.client-auth: need` and register https (`eureka.instance.secure-port-enabled: true`) | admin-server's instance `WebClient` configured with a client certificate                                                         |
+| B6 | mutual TLS (**used here too**, on top of B1) | `server.ssl.client-auth: want` + `ClientCertificateSubjectFilter` allow-listing `CN=admin-server`; registered https | `spring.http.clients.ssl.bundle` with a key store (admin-server's `service-identity` bundle) |
 | B7 | network only (no auth)     | `permitAll()` on `/actuator/**`, ideally on an internal-only `management.server.port` | nothing                                                                                                                                      |
 
 - ***B1–B3 are tried in that order*** — SBA's `BasicAuthHttpHeaderProvider` uses metadata first, then `service-map`,
@@ -830,7 +833,7 @@ sequenceDiagram
     DB-->>O: no
     O->>U: GET /api/users/{id} (timeout, breaker)
     U-->>O: 200
-    O->>DB: BEGIN; insert order + idempotency k1 + outbox; COMMIT
+    O->>DB: one transaction: insert order + idempotency k1 + outbox
     O-->>C: 201 Location /api/orders/107
     Note over C,O: response lost → client retries with k1
     C->>O: POST /api/orders (k1)

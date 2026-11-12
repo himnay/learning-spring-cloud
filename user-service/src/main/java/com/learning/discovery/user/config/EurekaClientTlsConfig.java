@@ -11,8 +11,9 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestClient;
 
 /**
- * Eureka client over HTTPS: trusts the CA in the SSL bundle named by {@code app.tls.trust-bundle} when it registers, renews and fetches
- * the registry at the https:// URLs in eureka.client.service-url.defaultZone.
+ * Eureka client over mutual TLS, with the SSL bundle named by {@code app.tls.client-bundle}: trusts its CA when it
+ * registers, renews and fetches the registry at the https:// URLs in eureka.client.service-url.defaultZone, and presents
+ * this service's certificate when eureka-server asks for one (its ClientCertificateSubjectFilter checks the subject).
  * <p>
  * The Eureka client doesn't read {@code spring.ssl.bundle.*} (only {@code eureka.client.tls.*} key/trust-store
  * files), and its RestClient transport replaces the request factory of the RestClient.Builder it is given, so
@@ -26,12 +27,12 @@ class EurekaClientTlsConfig {
 
     @Bean
     RestClientDiscoveryClientOptionalArgs restClientDiscoveryClientOptionalArgs(SslBundles sslBundles,
-            @Value("${app.tls.trust-bundle}") String trustBundle,
+            @Value("${app.tls.client-bundle}") String clientBundle,
             EurekaClientHttpRequestFactorySupplier requestFactorySupplier,
             ObjectProvider<RestClient.Builder> restClientBuilder) {
         RestClientDiscoveryClientOptionalArgs args = new RestClientDiscoveryClientOptionalArgs(
                 requestFactorySupplier, () -> restClientBuilder.getIfAvailable(RestClient::builder));
-        args.setSSLContext(sslBundles.getBundle(trustBundle).createSslContext());
+        args.setSSLContext(sslBundles.getBundle(clientBundle).createSslContext());
         return args;
     }
 }
